@@ -1,0 +1,80 @@
+name: Docker build & Trivy scan
+
+on:
+  push:
+    branches: [main, latest]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  IMAGE_NAME: poketeamcalculator:${{ github.sha }}
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (con submódulos)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 1. Construir la imagen Docker
+      - name: Build Docker image
+        run: docker build -t "$IMAGE_NAME" .
+
+      # 2. Escanear vulnerabilidades con Trivy
+      - name: Trivy scan
+        id: trivy
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}
+          format: table
+          output: trivy-report.txt
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: '1'
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.txt
+
+      # 3. Si hay vulnerabilidades, crear una issue con el output de Trivy
+      - name: Create issue with Trivy output
+        if: steps.trivy.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ ! -s trivy-report.txt ]; then
+            echo "Trivy falló sin generar informe; no se crea la issue."
+            exit 1
+          fi
+          {
+            echo "Trivy ha detectado vulnerabilidades en la imagen \`$IMAGE_NAME\`."
+            echo
+            echo "- Commit: ${GITHUB_SHA}"
+            echo "- Ref: ${GITHUB_REF}"
+            echo "- Run: ${RUN_URL}"
+            echo
+            echo '```'
+            # El cuerpo de una issue tiene un límite de 65536 caracteres
+            head -c 60000 trivy-report.txt
+            echo
+            echo '```'
+          } > issue-body.md
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Trivy: vulnerabilidades detectadas (${GITHUB_SHA::7})" \
+            --body-file issue-body.md
+
+      - name: Fail if vulnerabilities were found
+        if: steps.trivy.outcome == 'failure'
+        run: exit 1
