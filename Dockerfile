@@ -1,16 +1,18 @@
-FROM golang:1.27.2-alpine AS builder
+FROM golang:1.27.2-alpine AS builder_app
 ENV CGO_ENABLED=0
-
 RUN mkdir -pv /build
 WORKDIR /build
-COPY . .
+COPY go.mod go.sum /build/
+RUN go mod download
 
-WORKDIR /build/pokedata
-RUN go build -o pokedata-gen ./cmd/pokedata-gen
-WORKDIR /build
+COPY . .
 RUN go build -o app ./main.go
 
-FROM scratch
+
+FROM scratch AS production
+COPY --from=security_provider /etc/passwd /etc/passwd
+USER nonroot
 WORKDIR /
-COPY --from=builder /build/pokedata/pokedata-gen /pokedata
-COPY --from=builder /build/app /app
+COPY --from=builder_app /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder_app /build/app /app
+ENTRYPOINT ["/app"]
