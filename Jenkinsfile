@@ -29,7 +29,7 @@ pipeline {
             -v /tmp/trivy-cache:/root/.cache/ \
             aquasec/trivy:latest image \
             --severity HIGH,CRITICAL \
-            --exit-code 0 \
+            --exit-code 1 \
             ghcr.io/dsaub/poketeamcalculator:latest
         '''
       }
