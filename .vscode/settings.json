@@ -1,0 +1,6 @@
+{
+    "sonarlint.connectedMode.project": {
+        "connectionId": "https-sonarqube-elordenador-org",
+        "projectKey": "dsaub_PokeTeamCalculator_b62e37d4-63ba-41dc-8c3c-0ce2dce5e490"
+    }
+}
