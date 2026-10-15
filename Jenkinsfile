@@ -1,9 +1,5 @@
 pipeline {
   agent any
-  tools {
-      // Vincula la instalación de SonarScanner configurada en Jenkins Tools
-      sonarScanner 'SonarScanner'
-  }
   stages {
     stage('SCM') {
       steps {
