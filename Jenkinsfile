@@ -18,6 +18,24 @@ pipeline {
       steps {
         
         sh 'docker build -t ghcr.io/dsaub/poketeamcalculator:latest .'
+        
+      }
+    }
+    stage("Escaneo de Seguridad de Trivy") {
+      steps {
+        sh '''
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /tmp/trivy-cache:/root/.cache/ \
+            aquasec/trivy:latest image \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            ghcr.io/dsaub/poketeamcalculator:latest
+        '''
+      }
+    }
+    stage("Subir imagen") {
+      steps {
         withCredentials([usernamePassword(
           credentialsId: 'github-pat',
           usernameVariable: 'GH_USER',
