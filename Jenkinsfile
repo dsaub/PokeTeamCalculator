@@ -1,3 +1,4 @@
+@Library('mlib') _
 pipeline {
   agent any
   stages {
@@ -6,48 +7,41 @@ pipeline {
         checkout scm
       }
     }
+    stage('Security Checks') {
+      steps {
+        scanSecrets()
+        lintDockerfile()
+      }
+    }
     stage('SonarQube Analysis') {
         steps {
-            // Inyecta las variables del servidor SonarQube configurado en Jenkins
-            withSonarQubeEnv('SonarQube') {
-                sh 'sonar-scanner'
-            }
+            runSonar()
         }
+    }
+    stage('Preparar emulación x86_64') {
+      steps {
+        // Registra QEMU en binfmt_misc para poder ejecutar binarios amd64 en el agente ARM
+        sh 'docker run --privileged --rm tonistiigi/binfmt:latest --install amd64'
+      }
     }
     stage('Build docker image') {
       steps {
-        
-        sh 'docker build -t ghcr.io/dsaub/poketeamcalculator:latest .'
-        
+        sh '''
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --load \
+            -t ghcr.io/dsaub/poketeamcalculator:latest \
+            .
+        '''
       }
     }
     stage("Escaneo de Seguridad de Trivy") {
       steps {
-        sh '''
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v /tmp/trivy-cache:/root/.cache/ \
-            aquasec/trivy:latest image \
-            --severity HIGH,CRITICAL \
-            --exit-code 1 \
-            ghcr.io/dsaub/poketeamcalculator:latest
-        '''
+        scanImage('ghcr.io/dsaub/poketeamcalculator:latest')
       }
     }
     stage("Subir imagen") {
-      steps {
-        withCredentials([usernamePassword(
-          credentialsId: 'github-pat',
-          usernameVariable: 'GH_USER',
-          passwordVariable: 'GH_TOKEN'
-        )]) {
-          sh '''
-            echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
-            docker push ghcr.io/dsaub/poketeamcalculator:latest
-            docker logout ghcr.io
-          '''
-        }
-      }
+      dockerPushGhcr('ghcr.io/dsaub/poketeamcalculator:latest')
     }
   }
   post {
