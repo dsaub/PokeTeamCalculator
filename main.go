@@ -1,6 +1,7 @@
 package main
 
 import (
+	codehandlers "PokeTeamCalculator/endpoints/code_handlers"
 	"PokeTeamCalculator/endpoints/pokemons"
 	"fmt"
 	"log"
@@ -20,6 +21,7 @@ func main() {
 	router.GET("/api/v1/pokemon", pokemons.GetAllPokemons)
 	router.GET("/api/v1/pokemon/:id", pokemons.GetPokemonByID)
 
+	router.NoRoute(codehandlers.ErrorNotFound)
 	err := router.Run(":" + os.Getenv("PORT"))
 	if err != nil {
 		log.Fatalf("Error %v", err)
