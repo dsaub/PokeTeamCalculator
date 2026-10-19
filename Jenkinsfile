@@ -41,7 +41,9 @@ pipeline {
       }
     }
     stage("Subir imagen") {
-      dockerPushGhcr('ghcr.io/dsaub/poketeamcalculator:latest')
+      steps {
+        dockerPushGhcr('ghcr.io/dsaub/poketeamcalculator:latest')
+      }
     }
   }
   post {
