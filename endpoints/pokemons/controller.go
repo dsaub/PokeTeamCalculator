@@ -32,6 +32,9 @@ func GetAllPokemons(c *gin.Context) {
 		})
 		return
 	}
+	if data.Pokemons == nil {
+		data.Pokemons = []queries.GetPokemonsPagerRow{}
+	}
 	c.JSON(http.StatusOK, data)
 }
 
