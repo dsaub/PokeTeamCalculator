@@ -1,0 +1,33 @@
+{
+  "gen": "gen4",
+  "simulaciones": 300,
+  "rival": {
+    "especie": "Cranidos",
+    "nivel": 14,
+    "habilidad": "Mold Breaker",
+    "ivs": { "hp": 15, "atk": 15, "def": 15, "spa": 15, "spd": 15, "spe": 15 },
+    "movimientos": ["Headbutt", "Pursuit", "Leer"]
+  },
+  "candidatos": [
+    {
+      "especie": "Monferno",
+      "nivel": 16,
+      "habilidad": "Blaze",
+      "objeto": "Oran Berry",
+      "naturaleza": "Adamant",
+      "evs": { "atk": 20, "spe": 12 },
+      "movimientos": ["Mach Punch", "Ember", "Scratch", "Leer"]
+    },
+    {
+      "especie": "Grotle",
+      "nivel": 18,
+      "ivs": { "hp": 24, "atk": 28, "def": 20, "spa": 18, "spd": 22, "spe": 16 },
+      "movimientos": ["Razor Leaf", "Bite", "Absorb", "Withdraw"]
+    },
+    { "especie": "Prinplup", "nivel": 16, "movimientos": ["Bubble", "Peck", "Pound", "Growl"] },
+    { "especie": "Starly", "nivel": 12, "movimientos": ["Tackle", "Quick Attack", "Growl"] },
+    { "especie": "Bidoof", "nivel": 11, "movimientos": ["Tackle", "Growl", "Defense Curl", "Rollout"] },
+    { "especie": "Shinx", "nivel": 11, "movimientos": ["Tackle", "Leer", "Charge"] }
+  ],
+  "opciones": { "aleatoriedadRival": 0.2, "maxTurnos": 100 }
+}

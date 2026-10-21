@@ -1,0 +1,9 @@
+{
+  "namespace": "Contrataque",
+  "source": "poketeamcalculatorfrontend@0.0.0",
+  "shape": "package",
+  "provider": "ContrataqueProvider",
+  "componentCount": 4,
+  "skippedStoryIds": [],
+  "runtimeFontPrefixes": []
+}

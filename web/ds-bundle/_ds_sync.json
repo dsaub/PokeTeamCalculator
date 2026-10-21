@@ -1,0 +1,34 @@
+{
+  "shape": "package",
+  "styleSha": "16cf1e76bd329e900533976ccab55c458d0c2b8ed3e89b310eb73dd0df33c597",
+  "renderHashes": {
+    "Avatar": "2ba9285601b0f8a5",
+    "Footer": "396751b69fd67799",
+    "Layout": "2cafaa4e08db94fd",
+    "Logo": "a20ef95e87087ad8"
+  },
+  "sourceKeys": {
+    "Avatar": "b1775a3481ff7e46",
+    "Footer": "853b4bb9b17c2eab",
+    "Layout": "7f8ba700d8c8148a",
+    "Logo": "bdefc24e2a36d37a"
+  },
+  "keyRecipe": 7,
+  "scriptsSha": "bdeb85aad9c26681",
+  "sourceHashes": {
+    "components/general/Avatar/Avatar.jsx": "246a7918c946",
+    "components/general/Avatar/Avatar.d.ts": "6fc2bb750e3a",
+    "components/general/Avatar/Avatar.prompt.md": "936c7731a0bb",
+    "components/general/Footer/Footer.jsx": "dca009a2d617",
+    "components/general/Footer/Footer.d.ts": "8cf71f5f22be",
+    "components/general/Footer/Footer.prompt.md": "09287da3d78f",
+    "components/general/Layout/Layout.jsx": "48aa81696c32",
+    "components/general/Layout/Layout.d.ts": "d81170724ab7",
+    "components/general/Layout/Layout.prompt.md": "eb4afb4e27a0",
+    "components/general/Logo/Logo.jsx": "f8a2b761966b",
+    "components/general/Logo/Logo.d.ts": "655416980ba7",
+    "components/general/Logo/Logo.prompt.md": "1bcaf2ba2615"
+  },
+  "auxSha": "9847937c3154bf70",
+  "bundleSha12": "9d3eba45ca79"
+}

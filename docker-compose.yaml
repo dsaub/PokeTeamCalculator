@@ -1,6 +1,0 @@
-services:
-  app:
-    image: ghcr.io/dsaub/poketeamcalculator:latest
-    env_file: .env
-    ports:
-      - "8080:8080"

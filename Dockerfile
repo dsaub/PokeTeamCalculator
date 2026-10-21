@@ -5,10 +5,10 @@ FROM golang:1.27.2-alpine AS builder_app
 ENV CGO_ENABLED=0
 RUN mkdir -pv /build
 WORKDIR /build
-COPY go.mod go.sum /build/
+COPY api/go.mod api/go.sum /build/
 RUN go mod download
 
-COPY . .
+COPY api/ .
 RUN go build -o app ./main.go
 
 

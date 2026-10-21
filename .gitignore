@@ -1,2 +1,22 @@
-data/
+# Entorno y datos locales
 .env
+.env.*
+!.env.example
+data/
+
+# Dependencias y artefactos
+**/node_modules/
+**/dist/
+**/.vite/
+**/coverage/
+**/*.log
+
+# Estado local de herramientas
+_ops/
+web/_ops/
+_ref/
+web/_ref/
+
+# Sistema / editor
+.DS_Store
+Thumbs.db

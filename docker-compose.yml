@@ -1,0 +1,82 @@
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-pokedata}
+      MARIADB_USER: ${DB_USER:-pokedata}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-change-me}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-change-me-root}
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrator:
+    image: mariadb:11.4
+    env_file: .env
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+    volumes:
+      - ./migraciones:/migraciones:ro
+    command: ["sh", "/migraciones/aplicar.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: db
+      URL_WORKER: http://worker:7070
+      HOST_INTERNO: 0.0.0.0
+      GIN_MODE: release
+      # Confía en la red de Docker para leer X-Forwarded-For de nginx.
+      PROXIES_CONFIABLES: ${PROXIES_CONFIABLES:-172.16.0.0/12}
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: mysql://${DB_USER:-pokedata}:${DB_PASSWORD:-change-me}@db:3306/${DB_NAME:-pokedata}
+      URL_CALLBACK: http://api:8081
+      HOST_WORKER: 0.0.0.0
+      PUERTO: "7070"
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  db_data:

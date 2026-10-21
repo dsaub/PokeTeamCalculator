@@ -1,0 +1,48 @@
+{
+  "global": "Contrataque",
+  "pkg": "poketeamcalculatorfrontend",
+  "pkgDir": "/home/daniel/Proyectos/PokeTeamCalculatorFrontend",
+  "extraEntries": [
+    "./.design-sync/provider.jsx"
+  ],
+  "exported": [
+    "ContrataqueProvider"
+  ],
+  "storybookStatic": null,
+  "keyRecipe": 7,
+  "cfgSliceGlobal": "02f38f6e6af87e96441c4e2e59eb8f53ddabf238e8946d2c0880d0dac6257451",
+  "components": [
+    {
+      "name": "Avatar",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "b1775a3481ff7e46",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Footer",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "853b4bb9b17c2eab",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Layout",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "7f8ba700d8c8148a",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    },
+    {
+      "name": "Logo",
+      "group": "general",
+      "srcSha": null,
+      "sourceKey": "bdefc24e2a36d37a",
+      "cfgSlice": "5ff899b099eb6923833804cda955efdd69101524bec86f67dac5537cd81802e8",
+      "stories": []
+    }
+  ]
+}

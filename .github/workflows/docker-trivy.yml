@@ -1,4 +1,4 @@
-name: Docker build & Trivy scan
+name: CI, Docker build & Trivy scan
 
 on:
   push:
@@ -14,15 +14,49 @@ env:
   IMAGE_NAME: poketeamcalculator:${{ github.sha }}
 
 jobs:
-  build-and-scan:
+  checks:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (con submódulos)
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      # 1. Construir la imagen Docker
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+
+      - name: Go test
+        working-directory: api
+        run: go test ./...
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+
+      - name: Worker install, test and typecheck
+        working-directory: worker
+        run: |
+          bun install --frozen-lockfile
+          bun test
+          bunx tsc --noEmit
+
+      - name: Web install, check and build
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run check
+          bun run build
+
+  build-and-scan:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1. Construir la imagen Docker de la API
       - name: Build Docker image
         run: docker build -t "$IMAGE_NAME" .
 

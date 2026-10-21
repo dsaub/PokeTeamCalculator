@@ -1,0 +1,10 @@
+.git
+.env
+**/node_modules
+**/dist
+web
+worker
+docs
+migraciones
+.idea
+.vscode

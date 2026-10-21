@@ -1,0 +1,11 @@
+[
+  {
+    "sheet": 1,
+    "components": [
+      "Avatar",
+      "Footer",
+      "Layout",
+      "Logo"
+    ]
+  }
+]
