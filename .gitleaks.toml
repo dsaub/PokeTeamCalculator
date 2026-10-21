@@ -1,0 +1,7 @@
+# Gitleaks: los archivos de ejemplo solo contienen placeholders.
+# No se ignoran secretos reales: únicamente la ruta .env.example.
+[allowlist]
+description = "Placeholders de .env.example, no credenciales reales"
+paths = [
+  '''(^|/)\.env\.example$''',
+]
