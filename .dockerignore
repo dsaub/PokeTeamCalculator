@@ -6,5 +6,6 @@ web
 worker
 docs
 migraciones
+!migraciones/003_v_gym_teams_formas.sql
 .idea
 .vscode

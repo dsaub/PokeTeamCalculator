@@ -42,9 +42,7 @@ func Initialize() {
 	SetStatus("starting")
 	cfg := loadConfig()
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&tls=%s",
-		cfg.user, cfg.password, cfg.host, cfg.port, cfg.name, cfg.tls)
-	database, err := sql.Open("mysql", dsn)
+	database, err := sql.Open("mysql", dsn(cfg))
 	if err != nil {
 		log.Fatalf("Error: %v", err)
 	}
@@ -59,13 +57,20 @@ func Initialize() {
 	if err != nil {
 		log.Fatalf("Error al comprobar la base de datos: %v", err)
 	}
-	if populated {
+	switch im := nuevoImportador(); {
+	case populated:
 		SetStatus("ok")
-	} else {
+	case im.disponible():
+		importarEnSegundoPlano(im, cfg)
+	default:
 		SetStatus("error")
 		log.Println("Error, database is NOT initialized")
 	}
+}
 
+func dsn(cfg config) string {
+	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&tls=%s",
+		cfg.user, cfg.password, cfg.host, cfg.port, cfg.name, cfg.tls)
 }
 
 func waitForDatabase(db *sql.DB, attempts int, delay time.Duration) error {
