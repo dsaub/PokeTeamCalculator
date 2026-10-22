@@ -70,3 +70,63 @@ func TestClientIP(t *testing.T) {
 		t.Fatalf("IPv6: %q", got)
 	}
 }
+
+func TestRateLimiterMinimoUno(t *testing.T) {
+	l := NewRateLimiter(0)
+	if !l.Allow("1.1.1.1") || l.Allow("1.1.1.1") {
+		t.Fatal("con 0 por minuto debería permitir una")
+	}
+}
+
+func TestRateLimiterNoSuperaLaCapacidad(t *testing.T) {
+	l := NewRateLimiter(2)
+	ahora := time.Unix(1000, 0)
+	l.ahora = func() time.Time { return ahora }
+	l.Allow("1.1.1.1")
+	ahora = ahora.Add(time.Hour)
+	permitidas := 0
+	for i := 0; i < 5; i++ {
+		if l.Allow("1.1.1.1") {
+			permitidas++
+		}
+	}
+	if permitidas != 2 {
+		t.Fatalf("tras una hora se permiten %d, esperadas 2", permitidas)
+	}
+	// Un reloj que retrocede no regala tokens.
+	ahora = ahora.Add(-time.Minute)
+	if l.Allow("1.1.1.1") {
+		t.Fatal("no debería haber tokens")
+	}
+}
+
+func TestRateLimiterRunTerminaConElContexto(t *testing.T) {
+	l := NewRateLimiter(1)
+	terminaPronto(t, "RateLimiter.Run", func() { l.Run(ctxCancelado()) })
+}
+
+func TestClientIPCasosLimite(t *testing.T) {
+	confiables := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	casos := []struct {
+		nombre, remoto, xff, ip string
+	}{
+		{"sin puerto", "198.51.100.5", "", "198.51.100.5"},
+		{"no es una IP", "socket-unix", "", "socket-unix"},
+		{"IPv4 mapeada en IPv6", "[::ffff:10.0.0.1]:80", "203.0.113.9", "203.0.113.9"},
+		{"XFF inválido desde proxy", "10.0.0.1:80", "basura", "10.0.0.1"},
+		{"XFF vacío desde proxy", "10.0.0.1:80", "", "10.0.0.1"},
+		{"XFF mapeado", "10.0.0.1:80", "::ffff:203.0.113.9", "203.0.113.9"},
+	}
+	for _, caso := range casos {
+		t.Run(caso.nombre, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = caso.remoto
+			if caso.xff != "" {
+				req.Header.Set("X-Forwarded-For", caso.xff)
+			}
+			if got := ClientIP(req, confiables); got != caso.ip {
+				t.Fatalf("%q, esperada %q", got, caso.ip)
+			}
+		})
+	}
+}

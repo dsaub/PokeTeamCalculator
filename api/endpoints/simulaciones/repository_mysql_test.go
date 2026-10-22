@@ -144,7 +144,7 @@ VALUES (?, 'u-dup', '{}')`, hashDup); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !out.Duplicado || out.Job == nil || out.Posicion != 1 {
+	if !out.Duplicado || out.Job == nil {
 		t.Fatalf("se esperaba duplicado: %+v", out)
 	}
 }
@@ -188,7 +188,7 @@ VALUES (?, 'u-many', '{}')`, strings.Repeat("m", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 1 || jobs[0].ID != id || jobs[0].Estado != EstadoPendiente || jobs[0].Posicion != 1 {
+	if len(jobs) != 1 || jobs[0].ID != id || jobs[0].Estado != EstadoPendiente {
 		t.Fatalf("GetMany inesperado: %+v", jobs)
 	}
 
@@ -208,29 +208,114 @@ VALUES (?, 'u-many', '{}', 'completado', NOW(3) - INTERVAL 4 SECOND, NOW(3), '{}
 	}
 }
 
-func TestMySQLPosiciones(t *testing.T) {
+func insertarPendiente(t *testing.T, db *sql.DB, hash string, haceSegundos int) int64 {
+	t.Helper()
+	res, err := db.Exec(`INSERT INTO simulaciones (hash, usuario, peticion, creado)
+VALUES (?, 'u-estados', '{"gen":"gen4"}', NOW(3) - INTERVAL ? SECOND)`, strings.Repeat(hash, 64), haceSegundos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+func TestMySQLEstadosDelWorker(t *testing.T) {
+	db := abrirBDPruebas(t)
+	repo := NewMySQLRepository(db)
+	ctx := context.Background()
+	id := insertarPendiente(t, db, "p", 0)
+
+	comprobar := func(paso string, ok bool, err error, esperado bool) {
+		t.Helper()
+		if err != nil || ok != esperado {
+			t.Fatalf("%s: ok=%v err=%v, se esperaba ok=%v", paso, ok, err, esperado)
+		}
+	}
+	ok, err := repo.MarcarProcesando(ctx, id, "w1", 1)
+	comprobar("procesando", ok, err, true)
+	var estado, worker string
+	var intentos int
+	if err := db.QueryRow(`SELECT estado, worker, intentos FROM simulaciones WHERE id = ?`, id).Scan(&estado, &worker, &intentos); err != nil {
+		t.Fatal(err)
+	}
+	if estado != EstadoProcesando || worker != "w1" || intentos != 1 {
+		t.Fatalf("tras procesando: %s %s %d", estado, worker, intentos)
+	}
+
+	ok, err = repo.MarcarPendiente(ctx, id, 1)
+	comprobar("pendiente", ok, err, true)
+	ok, err = repo.MarcarPendiente(ctx, id, 1)
+	comprobar("pendiente sin estar en proceso", ok, err, false)
+
+	ok, err = repo.Completar(ctx, id, []byte(`{"gen":"gen4","resultados":[]}`))
+	comprobar("completar", ok, err, true)
+	job, err := repo.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Estado != EstadoCompletado || !job.Terminado.Valid || len(job.Resultado) == 0 {
+		t.Fatalf("tras completar: %+v", job)
+	}
+
+	// Un final no se pisa.
+	ok, err = repo.MarcarProcesando(ctx, id, "w2", 2)
+	comprobar("procesando tras completar", ok, err, false)
+	ok, err = repo.Fallar(ctx, id, "tarde")
+	comprobar("fallar tras completar", ok, err, false)
+
+	cancelado := insertarPendiente(t, db, "q", 0)
+	if out, err := repo.Cancel(ctx, cancelado, "u-estados"); err != nil || out != Cancelado {
+		t.Fatalf("cancelar: %v %v", out, err)
+	}
+	ok, err = repo.Completar(ctx, cancelado, []byte(`{}`))
+	comprobar("completar un cancelado", ok, err, false)
+
+	fallido := insertarPendiente(t, db, "r", 0)
+	ok, err = repo.Fallar(ctx, fallido, "Candidato 1: no existe")
+	comprobar("fallar", ok, err, true)
+	if job, _ := repo.Get(ctx, fallido); job.Estado != EstadoError || job.Error.String != "Candidato 1: no existe" {
+		t.Fatalf("tras fallar: %+v", job)
+	}
+}
+
+func TestMySQLActivosYEstados(t *testing.T) {
 	db := abrirBDPruebas(t)
 	repo := NewMySQLRepository(db)
 	ctx := context.Background()
 
-	var ids []int64
-	for i := 0; i < 3; i++ {
-		res, err := db.ExecContext(ctx, `INSERT INTO simulaciones (hash, usuario, peticion, creado)
-VALUES (?, 'u-pos', '{}', NOW(3) - INTERVAL ? SECOND)`, strings.Repeat(string(rune('f'+i)), 64), 30-i)
-		if err != nil {
-			t.Fatal(err)
-		}
-		id, _ := res.LastInsertId()
-		ids = append(ids, id)
+	viejo := insertarPendiente(t, db, "s", 60)
+	medio := insertarPendiente(t, db, "u", 30)
+	nuevo := insertarPendiente(t, db, "v", 0)
+	if _, err := repo.MarcarProcesando(ctx, medio, "w1", 2); err != nil {
+		t.Fatal(err)
+	}
+	terminado := insertarPendiente(t, db, "x", 90)
+	if _, err := repo.Fallar(ctx, terminado, "x"); err != nil {
+		t.Fatal(err)
 	}
 
-	posiciones, err := repo.PendingPositions(ctx)
+	activos, err := repo.ListActivos(ctx, time.Now().Add(-10*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, id := range ids {
-		if posiciones[id] != i+1 {
-			t.Fatalf("id %d: posición %d, se esperaba %d", id, posiciones[id], i+1)
+	if len(activos) != 2 || activos[0].ID != viejo || activos[1].ID != medio || activos[1].Intentos != 2 {
+		t.Fatalf("activos inesperados: %+v", activos)
+	}
+	if string(activos[0].Peticion) != `{"gen":"gen4"}` {
+		t.Fatalf("petición %q", activos[0].Peticion)
+	}
+
+	estados, err := repo.EstadosDe(ctx, []int64{viejo, medio, nuevo, terminado, 999999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	esperados := map[int64]string{viejo: EstadoPendiente, medio: EstadoProcesando, nuevo: EstadoPendiente, terminado: EstadoError}
+	if len(estados) != len(esperados) {
+		t.Fatalf("estados inesperados: %v", estados)
+	}
+	for id, e := range esperados {
+		if estados[id] != e {
+			t.Fatalf("id %d: %q, se esperaba %q", id, estados[id], e)
 		}
 	}
 }

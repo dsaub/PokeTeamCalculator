@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -113,36 +112,9 @@ func esperarCierre(t *testing.T, c *conexionSSE) {
 	}
 }
 
-func llamarCallback(t *testing.T, urlInterna, token string, id int64) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/interno/simulaciones/%d/lista", urlInterna, id), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusNoContent {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("callback status %d: %s", resp.StatusCode, b)
-	}
-}
-
-func servidorInterno(t *testing.T, a *apiPrueba) *httptest.Server {
-	t.Helper()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := httptest.NewServer(NewInternalHandler(a.svc, a.rt, a.cfg.TokenInterno, logger))
-	t.Cleanup(s.Close)
-	return s
-}
-
 func TestSSEInicialYCompletado(t *testing.T) {
 	a := nuevaAPI(t, nil)
 	srv := a.servidor(t)
-	interno := servidorInterno(t, a)
 	cliente := nuevoCliente(t)
 
 	_, d := crearHTTP(t, srv, cliente, cuerpoValido())
@@ -160,9 +132,15 @@ func TestSSEInicialYCompletado(t *testing.T) {
 		t.Fatalf("posición inicial: %s (%v)", datos, err)
 	}
 
+	a.tomar(t, "w1")
+	a.aplicarEstados(t)
+	if evento, datos = leerEvento(t, sse); evento != "procesando" {
+		t.Fatalf("se esperaba procesando: %q %s", evento, datos)
+	}
+
 	resultado := `{"gen":"gen4","rival":"Cranidos (Nv. 14)","simulaciones":300,"resultados":[{"pokemon":"Monferno","nivel":16,"victorias":300,"derrotas":0,"empates":0,"winrate":1,"psMedioVictoria":0.5,"turnosMedio":4}],"ms":10}`
-	a.repo.setEstado(id, EstadoCompletado, []byte(resultado), "")
-	llamarCallback(t, interno.URL, a.cfg.TokenInterno, id)
+	a.publicarEstado(t, "id", id, "tipo", EstadoCompletado, "intentos", 1, "worker", "w1", "resultado", resultado)
+	a.aplicarEstados(t)
 
 	evento, datos = leerEvento(t, sse)
 	if evento != "completado" {
@@ -178,12 +156,17 @@ func TestSSEInicialYCompletado(t *testing.T) {
 		t.Fatalf("resultado SSE: %s", datos)
 	}
 	esperarCierre(t, sse)
+	if job, _ := a.repo.Get(context.Background(), id); job.Estado != EstadoCompletado || string(job.Resultado) != resultado {
+		t.Fatalf("MariaDB no recibió el resultado: %+v", job)
+	}
+	if n, _ := a.cola.EstadosSinAplicar(context.Background()); n != 0 {
+		t.Fatalf("quedan %d estados sin confirmar", n)
+	}
 }
 
 func TestSSEVariosClientes(t *testing.T) {
 	a := nuevaAPI(t, nil)
 	srv := a.servidor(t)
-	interno := servidorInterno(t, a)
 	cliente := nuevoCliente(t)
 
 	_, d := crearHTTP(t, srv, cliente, cuerpoValido())
@@ -194,8 +177,8 @@ func TestSSEVariosClientes(t *testing.T) {
 	leerEvento(t, sse1)
 	leerEvento(t, sse2)
 
-	a.repo.setEstado(id, EstadoCompletado, []byte(`{"gen":"gen4","resultados":[]}`), "")
-	llamarCallback(t, interno.URL, a.cfg.TokenInterno, id)
+	a.publicarEstado(t, "id", id, "tipo", EstadoCompletado, "intentos", 1, "worker", "w1", "resultado", `{"gen":"gen4","resultados":[]}`)
+	a.aplicarEstados(t)
 
 	for i, sse := range []*conexionSSE{sse1, sse2} {
 		evento, _ := leerEvento(t, sse)
@@ -252,10 +235,9 @@ func TestSSESondeoRespaldo(t *testing.T) {
 	}
 }
 
-func TestSSEPosicionesTrasCallback(t *testing.T) {
+func TestSSEPosicionesAlTomarUnTrabajo(t *testing.T) {
 	a := nuevaAPI(t, nil)
 	srv := a.servidor(t)
-	interno := servidorInterno(t, a)
 	c1 := nuevoCliente(t)
 	c2 := nuevoCliente(t)
 
@@ -273,8 +255,10 @@ func TestSSEPosicionesTrasCallback(t *testing.T) {
 		t.Fatalf("posición inicial de job2: %s %s", evento, datos)
 	}
 
-	a.repo.setEstado(id1, EstadoCompletado, []byte(`{"gen":"gen4","resultados":[]}`), "")
-	llamarCallback(t, interno.URL, a.cfg.TokenInterno, id1)
+	if tomado := a.tomar(t, "w1"); tomado != id1 {
+		t.Fatalf("el worker tomó %d antes que %d", tomado, id1)
+	}
+	a.aplicarEstados(t)
 
 	evento, datos = leerEvento(t, sse)
 	if evento != "posicion" {
@@ -282,6 +266,50 @@ func TestSSEPosicionesTrasCallback(t *testing.T) {
 	}
 	if !strings.Contains(datos, `"posicion":1`) {
 		t.Fatalf("posición tras avanzar la cola: %s", datos)
+	}
+}
+
+// El requisito de la cola: un trabajo que falla vuelve detrás de los que ya
+// esperaban, y el jugador lo ve en su posición.
+func TestSSEReintentoVuelveAlFinal(t *testing.T) {
+	a := nuevaAPI(t, nil)
+	srv := a.servidor(t)
+	c1 := nuevoCliente(t)
+	c2 := nuevoCliente(t)
+
+	_, d1 := crearHTTP(t, srv, c1, cuerpoValido())
+	id1 := int64(d1["id"].(float64))
+	cuerpo2 := cuerpoValido()
+	cuerpo2["rival"].(map[string]any)["especie"] = "Shieldon"
+	_, d2 := crearHTTP(t, srv, c2, cuerpo2)
+	id2 := int64(d2["id"].(float64))
+
+	sse := abrirSSE(t, srv, c1, id1)
+	if evento, datos := leerEvento(t, sse); evento != "posicion" || !strings.Contains(datos, `"posicion":1`) {
+		t.Fatalf("posición inicial: %s %s", evento, datos)
+	}
+
+	a.tomar(t, "w1")
+	a.aplicarEstados(t)
+	if evento, _ := leerEvento(t, sse); evento != "procesando" {
+		t.Fatalf("se esperaba procesando: %q", evento)
+	}
+
+	a.reintentar(t, "w1", id1)
+	a.aplicarEstados(t)
+	if cola := a.enCola(t); len(cola) != 2 || cola[0] != id2 || cola[1] != id1 {
+		t.Fatalf("cola tras el fallo %v, se esperaba [%d %d]", cola, id2, id1)
+	}
+	evento, datos := leerEvento(t, sse)
+	if evento != "posicion" || !strings.Contains(datos, `"posicion":2`) {
+		t.Fatalf("tras el fallo debía quedar el segundo: %s %s", evento, datos)
+	}
+	if a.repo.estado(id1) != EstadoPendiente {
+		t.Fatalf("estado en MariaDB %q", a.repo.estado(id1))
+	}
+	_, cuerpo := hacerSinCuerpo(t, c1, http.MethodGet, fmt.Sprintf("%s/api/simulaciones/%d", srv.URL, id1))
+	if m := decodificar(t, cuerpo); m["estado"] != EstadoPendiente || m["posicion"].(float64) != 2 {
+		t.Fatalf("GET tras el fallo: %s", cuerpo)
 	}
 }
 

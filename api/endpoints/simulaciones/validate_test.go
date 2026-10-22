@@ -228,3 +228,51 @@ func TestLeerPeticionTipoIncorrecto(t *testing.T) {
 		t.Fatalf("error inesperado: %v", err)
 	}
 }
+
+func TestLeerPeticionErroresDeFormato(t *testing.T) {
+	valido, _ := json.Marshal(cuerpoValido())
+	casos := []struct {
+		nombre, cuerpo, error string
+	}{
+		{"array en vez de objeto", `[]`, "cuerpo: tipo de dato inválido"},
+		{"JSON cortado", `{"gen":`, "cuerpo: JSON inválido"},
+		{"sintaxis", `{"gen" "gen4"}`, "cuerpo: JSON inválido"},
+		{"basura detrás del objeto", string(valido) + ` }`, "cuerpo: JSON inválido"},
+		{"objeto válido pero petición inválida", `{"gen":"gen4","rival":{},"candidatos":[]}`, "candidatos: debe haber entre 1 y 6"},
+	}
+	for _, caso := range casos {
+		t.Run(caso.nombre, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/simulaciones", strings.NewReader(caso.cuerpo))
+			_, err := LeerPeticion(httptest.NewRecorder(), req)
+			if err == nil || err.Error() != caso.error {
+				t.Fatalf("error %v, esperado %q", err, caso.error)
+			}
+		})
+	}
+}
+
+func TestValidarPokemonCamposDeTexto(t *testing.T) {
+	casos := []struct {
+		campo string
+		valor any
+		error string
+	}{
+		{"habilidad", strings.Repeat("a", 200), "candidatos[0].habilidad"},
+		{"objeto", "Oran\nBerry", "candidatos[0].objeto"},
+		{"naturaleza", strings.Repeat("a", 200), "candidatos[0].naturaleza"},
+		{"nivel", 101, "candidatos[0].nivel: debe estar entre 1 y 100"},
+		{"nivel", -1, "candidatos[0].nivel: debe estar entre 1 y 100"},
+	}
+	for _, caso := range casos {
+		t.Run(caso.campo, func(t *testing.T) {
+			cuerpo := cuerpoValido()
+			candidato := cuerpo["candidatos"].([]any)[0].(map[string]any)
+			candidato[caso.campo] = caso.valor
+			p := peticionClienteDesde(t, cuerpo)
+			err := ValidarPeticion(&p)
+			if err == nil || !strings.HasPrefix(err.Error(), caso.error) {
+				t.Fatalf("error %v, esperado %q", err, caso.error)
+			}
+		})
+	}
+}

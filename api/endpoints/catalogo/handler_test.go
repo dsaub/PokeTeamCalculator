@@ -3,6 +3,7 @@ package catalogo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -188,5 +189,64 @@ func TestGenInvalidaDetalle(t *testing.T) {
 	rec, _ := pedir(t, r, "/api/pokemon/Monferno?gen=gen0")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status %d", rec.Code)
+	}
+}
+
+func TestErroresDelRepositorio(t *testing.T) {
+	juegos := []Juego{{ID: "platino", Nombre: "Pokémon Platino", Gen: "gen4", VersionGroup: "platinum"}}
+	casos := []struct {
+		nombre string
+		repo   *repoFalso
+		ruta   string
+		codigo int
+		error  string
+	}{
+		{"juegos: error interno", &repoFalso{err: errors.New("caída")}, "/api/juegos", http.StatusInternalServerError, "Error interno"},
+		{"líderes: error interno", &repoFalso{err: errors.New("caída")}, "/api/juegos/platino/lideres", http.StatusInternalServerError, "Error interno"},
+		{"búsqueda: error interno", &repoFalso{err: errors.New("caída")}, "/api/pokemon?gen=gen4&q=pi", http.StatusInternalServerError, "Error interno"},
+		{"detalle: error interno", &repoFalso{err: errors.New("caída")}, "/api/pokemon/Pikachu?gen=gen4", http.StatusInternalServerError, "Error interno"},
+		{"detalle: no encontrado del repositorio", &repoFalso{err: ErrNoEncontrado}, "/api/pokemon/Missingno?gen=gen4", http.StatusNotFound, "No encontrado"},
+		{"detalle: especie en blanco", &repoFalso{}, "/api/pokemon/%20?gen=gen4", http.StatusNotFound, "No encontrado"},
+		{"búsqueda: gen inválida", &repoFalso{}, "/api/pokemon?gen=gen10&q=pika", http.StatusBadRequest, "gen: debe ser gen1, gen2, …, gen9"},
+		{"búsqueda: q de un carácter con espacios", &repoFalso{}, "/api/pokemon?gen=gen4&q=%20p%20", http.StatusBadRequest, "q: debe tener al menos 2 caracteres"},
+	}
+	for _, caso := range casos {
+		t.Run(caso.nombre, func(t *testing.T) {
+			if caso.repo.juegos == nil {
+				caso.repo.juegos = juegos
+			}
+			rec, cuerpo := pedir(t, nuevoHandler(t, caso.repo), caso.ruta)
+			if rec.Code != caso.codigo || cuerpo["error"] != caso.error {
+				t.Fatalf("%d %v, esperado %d %q", rec.Code, cuerpo, caso.codigo, caso.error)
+			}
+			if rec.Header().Get("Cache-Control") != "" {
+				t.Fatalf("un error no debe cachearse: %q", rec.Header().Get("Cache-Control"))
+			}
+		})
+	}
+}
+
+func TestRespuestasVaciasSonArrays(t *testing.T) {
+	repo := &repoFalso{juegos: []Juego{{ID: "platino", Gen: "gen4", VersionGroup: "platinum"}}}
+	r := nuevoHandler(t, repo)
+	for _, ruta := range []string{"/api/juegos/platino/lideres", "/api/pokemon?gen=gen4&q=zz"} {
+		rec, _ := pedir(t, r, ruta)
+		if rec.Code != http.StatusOK || rec.Body.String() != "[]" {
+			t.Fatalf("%s: %d %q", ruta, rec.Code, rec.Body.String())
+		}
+	}
+	repo.juegos = nil
+	rec, _ := pedir(t, r, "/api/juegos")
+	if rec.Body.String() != "[]" {
+		t.Fatalf("juegos vacío: %q", rec.Body.String())
+	}
+}
+
+func TestErrorValidacionSinCampo(t *testing.T) {
+	if got := (&ErrorValidacion{Mensaje: "algo falla"}).Error(); got != "algo falla" {
+		t.Fatalf("%q", got)
+	}
+	if got := (&ErrorValidacion{Campo: "q", Mensaje: "corto"}).Error(); got != "q: corto" {
+		t.Fatalf("%q", got)
 	}
 }

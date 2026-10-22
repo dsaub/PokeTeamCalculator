@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -45,13 +43,17 @@ func TestCrearSimulacion(t *testing.T) {
 	if headers.Get("Set-Cookie") == "" {
 		t.Fatal("falta la cookie de sesión")
 	}
-	if a.waker.numLlamadas() != 1 {
-		t.Fatalf("waker llamado %d veces", a.waker.numLlamadas())
+	if cola := a.enCola(t); len(cola) != 1 || cola[0] != id {
+		t.Fatalf("cola de Redis %v, se esperaba [%d]", cola, id)
 	}
 
 	job, err := a.repo.Get(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// El worker recibe en Redis la misma petición que guarda MariaDB.
+	if guardada := a.mr.HGet(claveTrabajo(id), "peticion"); guardada != string(job.Peticion) {
+		t.Fatalf("petición en Redis %q, en MariaDB %q", guardada, job.Peticion)
 	}
 	var p Peticion
 	if err := json.Unmarshal(job.Peticion, &p); err != nil {
@@ -98,8 +100,8 @@ func TestCrearDesdeCache(t *testing.T) {
 	if m["resultado"].(map[string]any)["gen"] != "gen4" {
 		t.Fatalf("resultado inesperado: %s", datos)
 	}
-	if a.waker.numLlamadas() != 0 {
-		t.Fatal("un acierto de caché no debe despertar al worker")
+	if cola := a.enCola(t); len(cola) != 0 {
+		t.Fatalf("un acierto de caché no debe encolar nada: %v", cola)
 	}
 }
 
@@ -117,8 +119,8 @@ func TestDuplicadoMismoUsuario(t *testing.T) {
 	if a.repo.count() != 1 {
 		t.Fatalf("se crearon %d trabajos", a.repo.count())
 	}
-	if a.waker.numLlamadas() != 1 {
-		t.Fatalf("waker llamado %d veces", a.waker.numLlamadas())
+	if cola := a.enCola(t); len(cola) != 1 {
+		t.Fatalf("el duplicado no debe encolarse otra vez: %v", cola)
 	}
 }
 
@@ -234,7 +236,7 @@ func TestLimitePorUsuarioConcurrente(t *testing.T) {
 
 func TestWorkerNoDisponible(t *testing.T) {
 	a := nuevaAPI(t, nil)
-	a.waker.disponible = false
+	a.sinWorkers(t)
 	srv := a.servidor(t)
 
 	status, datos, _ := hacerJSON(t, nuevoCliente(t), http.MethodPost, srv.URL+"/api/simulaciones", cuerpoValido())
@@ -244,6 +246,65 @@ func TestWorkerNoDisponible(t *testing.T) {
 	m := decodificar(t, datos)
 	if m["workerDisponible"] != false {
 		t.Fatalf("se esperaba workerDisponible=false: %s", datos)
+	}
+	// Se encola igual: lo tomará el primer worker que arranque.
+	if cola := a.enCola(t); len(cola) != 1 {
+		t.Fatalf("cola de Redis %v", cola)
+	}
+}
+
+// Un worker que acaba de arrancar todavía no está en la comprobación periódica:
+// al crear se mira otra vez.
+func TestWorkerRecienArrancado(t *testing.T) {
+	a := nuevaAPI(t, nil)
+	a.sinWorkers(t)
+	if _, err := a.mr.ZAdd(claveWorkers, float64(time.Now().UnixMilli()), "nuevo"); err != nil {
+		t.Fatal(err)
+	}
+	srv := a.servidor(t)
+
+	_, datos, _ := hacerJSON(t, nuevoCliente(t), http.MethodPost, srv.URL+"/api/simulaciones", cuerpoValido())
+	if _, ok := decodificar(t, datos)["workerDisponible"]; ok {
+		t.Fatalf("el worker recién arrancado debía contar como disponible: %s", datos)
+	}
+}
+
+func TestWorkerConLatidoCaducado(t *testing.T) {
+	a := nuevaAPI(t, nil)
+	a.sinWorkers(t)
+	if _, err := a.mr.ZAdd(claveWorkers, float64(time.Now().Add(-time.Minute).UnixMilli()), "viejo"); err != nil {
+		t.Fatal(err)
+	}
+	if a.cola.Comprobar(context.Background()) {
+		t.Fatal("un latido de hace un minuto no cuenta como worker vivo")
+	}
+	a.latir(t, "nuevo")
+	if !a.cola.Comprobar(context.Background()) {
+		t.Fatal("un latido reciente sí cuenta")
+	}
+}
+
+func TestCrearConRedisCaido(t *testing.T) {
+	a := nuevaAPI(t, nil)
+	srv := a.servidor(t)
+
+	a.mr.SetError("Redis caído")
+	status, datos, _ := hacerJSON(t, nuevoCliente(t), http.MethodPost, srv.URL+"/api/simulaciones", cuerpoValido())
+	if status != http.StatusAccepted {
+		t.Fatalf("la creación no depende de Redis: status %d %s", status, datos)
+	}
+	m := decodificar(t, datos)
+	if m["workerDisponible"] != false {
+		t.Fatalf("se esperaba workerDisponible=false: %s", datos)
+	}
+	id := int64(m["id"].(float64))
+
+	// Cuando Redis vuelve, la reconciliación lo encola.
+	a.mr.SetError("")
+	a.repo.envejecer(id, time.Minute)
+	a.rt.Reconciliar(context.Background())
+	if cola := a.enCola(t); len(cola) != 1 || cola[0] != id {
+		t.Fatalf("cola tras reconciliar %v, se esperaba [%d]", cola, id)
 	}
 }
 
@@ -310,16 +371,28 @@ func TestCancelar(t *testing.T) {
 	if status, _ := hacerSinCuerpo(t, c1, http.MethodDelete, ruta); status != http.StatusConflict {
 		t.Fatalf("cancelar dos veces: %d", status)
 	}
+	// Sale de la cola de Redis y queda la lápida.
+	if cola := a.enCola(t); len(cola) != 0 {
+		t.Fatalf("cola tras cancelar %v", cola)
+	}
+	if a.mr.HGet(claveTrabajo(id), "cancelado") != "1" {
+		t.Fatal("falta la marca de cancelado en Redis")
+	}
 
 	// En proceso también se puede cancelar.
 	cuerpo := cuerpoValido()
 	cuerpo["rival"].(map[string]any)["especie"] = "Shieldon"
 	_, d2 := crearHTTP(t, srv, c1, cuerpo)
 	id2 := int64(d2["id"].(float64))
-	a.repo.setProcesando(id2)
+	a.tomar(t, "w1")
+	a.aplicarEstados(t)
 	ruta2 := fmt.Sprintf("%s/api/simulaciones/%d", srv.URL, id2)
 	if status, datos := hacerSinCuerpo(t, c1, http.MethodDelete, ruta2); status != http.StatusNoContent {
 		t.Fatalf("cancelar procesando: %d %s", status, datos)
+	}
+	// El worker verá la marca y no publicará el resultado.
+	if a.mr.HGet(claveTrabajo(id2), "cancelado") != "1" {
+		t.Fatal("falta la marca de cancelado en Redis")
 	}
 }
 
@@ -414,53 +487,5 @@ func TestServiceRechazaMaxTurnosInvalido(t *testing.T) {
 	var v *ValidationError
 	if !errors.As(err, &v) || v.Campo != "opciones.maxTurnos" {
 		t.Fatalf("error inesperado: %v", err)
-	}
-}
-
-func TestInternoTokenY404(t *testing.T) {
-	a := nuevaAPI(t, nil)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	interno := httptest.NewServer(NewInternalHandler(a.svc, a.rt, a.cfg.TokenInterno, logger))
-	t.Cleanup(interno.Close)
-
-	req, _ := http.NewRequest(http.MethodPost, interno.URL+"/interno/simulaciones/1/lista", nil)
-	req.Header.Set("Authorization", "Bearer incorrecto")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("token incorrecto: %d", resp.StatusCode)
-	}
-
-	req2, _ := http.NewRequest(http.MethodPost, interno.URL+"/interno/simulaciones/999/lista", nil)
-	req2.Header.Set("Authorization", "Bearer "+a.cfg.TokenInterno)
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp2.Body.Close()
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Fatalf("id inexistente: %d", resp2.StatusCode)
-	}
-}
-
-func TestInternoPendiente204(t *testing.T) {
-	a := nuevaAPI(t, nil)
-	job := a.repo.addJob(Job{Hash: "h", Usuario: "u", Estado: EstadoPendiente, Peticion: []byte(`{}`)})
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	interno := httptest.NewServer(NewInternalHandler(a.svc, a.rt, a.cfg.TokenInterno, logger))
-	t.Cleanup(interno.Close)
-
-	req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/interno/simulaciones/%d/lista", interno.URL, job.ID), nil)
-	req.Header.Set("Authorization", "Bearer "+a.cfg.TokenInterno)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("callback pendiente: %d", resp.StatusCode)
 	}
 }

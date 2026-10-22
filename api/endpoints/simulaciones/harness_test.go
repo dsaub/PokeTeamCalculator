@@ -9,17 +9,23 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 type apiPrueba struct {
 	cfg     Config
 	repo    *memRepo
-	waker   *wakerFalso
+	mr      *miniredis.Miniredis
+	rdb     *redis.Client
+	cola    *ColaRedis
+	estados *Estados
 	catalog *catalogFalso
 	svc     *Service
 	hub     *Hub
@@ -57,9 +63,8 @@ func (c *catalogFalso) configurar(existe, valida bool) {
 
 func configPrueba() Config {
 	return Config{
-		TokenInterno:            "token-de-prueba",
-		URLWorker:               "http://127.0.0.1:7070",
-		PuertoInterno:           "8081",
+		URLRedis:                "redis://127.0.0.1:6379",
+		LatidoCaducadoWorker:    15 * time.Second,
 		SecretoCookie:           []byte("0123456789abcdef0123456789abcdef"),
 		Simulaciones:            300,
 		AleatoriedadRival:       0.2,
@@ -83,27 +88,127 @@ func nuevaAPI(t *testing.T, ajustar func(*Config, *memRepo)) *apiPrueba {
 	if ajustar != nil {
 		ajustar(&cfg, repo)
 	}
+	mr := miniredis.RunT(t)
+	// Sin reintentos: los tests que cierran miniredis fallan al momento.
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr(), MaxRetries: -1, DialerRetries: 1})
+	t.Cleanup(func() { _ = rdb.Close() })
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	waker := &wakerFalso{disponible: true}
+	cola := NewColaRedis(rdb, cfg.LatidoCaducadoWorker, logger)
 	catalog := &catalogFalso{existe: true, valida: true}
-	svc := NewService(repo, cfg, waker, logger, catalog)
+	svc := NewService(repo, cfg, cola, logger, catalog)
 	hub := NewHub()
-	rt := NewRealtime(hub, svc, cfg.IntervaloSondeoSSE, logger)
+	rt := NewRealtime(hub, svc, cola, cfg.IntervaloSondeoSSE, logger)
 	handler := NewHandler(svc, rt, cfg, logger)
 
 	router := gin.New()
 	handler.Register(router)
 
-	return &apiPrueba{
+	a := &apiPrueba{
 		cfg:     cfg,
 		repo:    repo,
-		waker:   waker,
+		mr:      mr,
+		rdb:     rdb,
+		cola:    cola,
+		estados: NewEstados(cola, svc, rt, logger),
 		catalog: catalog,
 		svc:     svc,
 		hub:     hub,
 		rt:      rt,
 		handler: handler,
 		router:  router,
+	}
+	// Por defecto hay un worker vivo.
+	a.latir(t, "w1")
+	return a
+}
+
+// latir registra el latido de un worker con la hora de Redis, como el worker.
+func (a *apiPrueba) latir(t *testing.T, worker string) {
+	t.Helper()
+	if _, err := a.mr.ZAdd(claveWorkers, float64(time.Now().UnixMilli()), worker); err != nil {
+		t.Fatal(err)
+	}
+	a.cola.Comprobar(context.Background())
+}
+
+// sinWorkers borra todos los latidos.
+func (a *apiPrueba) sinWorkers(t *testing.T) {
+	t.Helper()
+	a.mr.Del(claveWorkers)
+	a.cola.Comprobar(context.Background())
+}
+
+// enCola devuelve la cola de Redis en orden de salida: el primero es el
+// siguiente que tomará un worker.
+func (a *apiPrueba) enCola(t *testing.T) []int64 {
+	t.Helper()
+	ids, err := a.rdb.LRange(context.Background(), claveCola, 0, -1).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cola := make([]int64, 0, len(ids))
+	for i := len(ids) - 1; i >= 0; i-- {
+		id, err := strconv.ParseInt(ids[i], 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cola = append(cola, id)
+	}
+	return cola
+}
+
+// tomar hace lo que el worker al tomar un trabajo: lo saca de la cola, gasta
+// un intento y publica `procesando`. Devuelve el id.
+func (a *apiPrueba) tomar(t *testing.T, worker string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	s, err := a.rdb.LMove(ctx, claveCola, "sim:procesando:"+worker, "RIGHT", "LEFT").Result()
+	if err != nil {
+		t.Fatalf("no había nada en la cola: %v", err)
+	}
+	id, _ := strconv.ParseInt(s, 10, 64)
+	intentos, err := a.rdb.HIncrBy(ctx, claveTrabajo(id), "intentos", 1).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.publicarEstado(t, "id", id, "tipo", EstadoProcesando, "intentos", intentos, "worker", worker)
+	return id
+}
+
+// reintentar hace lo que el worker con un fallo reintentable: el trabajo
+// vuelve al final de la cola y publica `pendiente`.
+func (a *apiPrueba) reintentar(t *testing.T, worker string, id int64) {
+	t.Helper()
+	ctx := context.Background()
+	idTexto := strconv.FormatInt(id, 10)
+	if err := a.rdb.LRem(ctx, "sim:procesando:"+worker, 0, idTexto).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.rdb.LPush(ctx, claveCola, idTexto).Err(); err != nil {
+		t.Fatal(err)
+	}
+	intentos, _ := a.rdb.HGet(ctx, claveTrabajo(id), "intentos").Int()
+	a.publicarEstado(t, "id", id, "tipo", EstadoPendiente, "motivo", "reintento", "intentos", intentos, "worker", worker)
+}
+
+// publicarEstado escribe una entrada en sim:estados, como el worker.
+func (a *apiPrueba) publicarEstado(t *testing.T, campos ...any) {
+	t.Helper()
+	if err := a.rdb.XAdd(context.Background(), &redis.XAddArgs{Stream: claveEstados, Values: campos}).Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// aplicarEstados hace que la API aplique lo que haya en sim:estados.
+func (a *apiPrueba) aplicarEstados(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	if err := a.cola.prepararGrupo(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.estados.Procesar(ctx, -1); err != nil {
+		t.Fatal(err)
 	}
 }
 

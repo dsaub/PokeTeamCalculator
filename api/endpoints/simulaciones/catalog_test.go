@@ -1,34 +1,84 @@
 package simulaciones
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
 
-func TestHabilidadEnFilas(t *testing.T) {
-	filas := []filaHabilidad{
-		// Actuales.
-		{slot: 1, abilityID: 10, generacion: 4, ident: "mold-breaker"},
-		{slot: 2, abilityID: 11, generacion: 5, ident: "sheer-force"},
-		// Override para gen 4: el slot 2 no existía.
-		{slot: 2, abilityID: 0, generacion: 0, ident: "", pasadaGen: 4},
-		// Habilidad oculta actual.
-		{slot: 3, hidden: true, abilityID: 12, generacion: 3, ident: "sand-force"},
-	}
+	"github.com/DATA-DOG/go-sqlmock"
+)
 
-	if !habilidadEnFilas(filas, 4, "Mold Breaker") {
-		t.Fatal("Mold Breaker debería ser válida en gen 4")
+var columnasHabilidadesCatalogo = []string{"slot", "hidden", "ability_id", "gen", "ident", "pasada"}
+
+func catalogoFalsoSQL(t *testing.T) (*MySQLCatalog, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !habilidadEnFilas(filas, 4, "moldbreaker") {
-		t.Fatal("la normalización toID debería aplicar")
+	t.Cleanup(func() {
+		_ = db.Close()
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Error(err)
+		}
+	})
+	return NewMySQLCatalog(db), mock
+}
+
+func TestCatalogoHabilidadValidaConSQLFalso(t *testing.T) {
+	cat, mock := catalogoFalsoSQL(t)
+	mock.ExpectQuery(`SELECT id FROM pokemon`).WithArgs("cranidos").WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(408))
+	mock.ExpectQuery(`pokemon_abilities pa`).WithArgs(408, 408).WillReturnRows(sqlmock.NewRows(columnasHabilidadesCatalogo).
+		AddRow(1, false, 104, 4, "mold-breaker", 0).
+		AddRow(3, true, 125, 5, "sheer-force", 0))
+
+	existe, valida, err := cat.HabilidadValida(context.Background(), 4, "Cranidos", "Mold Breaker")
+	if err != nil || !existe || !valida {
+		t.Fatalf("existe=%v valida=%v err=%v", existe, valida, err)
 	}
-	if habilidadEnFilas(filas, 4, "Sheer Force") {
-		t.Fatal("Sheer Force no existía en gen 4")
+}
+
+func TestCatalogoHabilidadValidaCasos(t *testing.T) {
+	errBase := errors.New("caída")
+	casos := []struct {
+		nombre         string
+		especie        string
+		preparar       func(sqlmock.Sqlmock)
+		existe, valida bool
+		conError       bool
+	}{
+		{"especie vacía: no consulta", " -- ", func(sqlmock.Sqlmock) {}, false, false, false},
+		{"especie inexistente", "Missingno", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(`SELECT id FROM pokemon`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+		}, false, false, false},
+		{"error al buscar la especie", "Cranidos", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(`SELECT id FROM pokemon`).WillReturnError(errBase)
+		}, false, false, true},
+		{"error al leer habilidades", "Cranidos", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(`SELECT id FROM pokemon`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+			m.ExpectQuery(`pokemon_abilities`).WillReturnError(errBase)
+		}, true, false, true},
+		{"fila con otro tipo", "Cranidos", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(`SELECT id FROM pokemon`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+			m.ExpectQuery(`pokemon_abilities`).WillReturnRows(sqlmock.NewRows(columnasHabilidadesCatalogo).AddRow("x", false, 1, 3, "a", 0))
+		}, true, false, true},
+		{"error al recorrer", "Cranidos", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(`SELECT id FROM pokemon`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+			m.ExpectQuery(`pokemon_abilities`).WillReturnRows(sqlmock.NewRows(columnasHabilidadesCatalogo).AddRow(1, false, 1, 3, "a", 0).RowError(0, errBase))
+		}, true, false, true},
+		{"habilidad que no tiene", "Cranidos", func(m sqlmock.Sqlmock) {
+			m.ExpectQuery(`SELECT id FROM pokemon`).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
+			m.ExpectQuery(`pokemon_abilities`).WillReturnRows(sqlmock.NewRows(columnasHabilidadesCatalogo).AddRow(1, false, 104, 4, "mold-breaker", 0))
+		}, true, false, false},
 	}
-	if !habilidadEnFilas(filas, 5, "Sheer Force") {
-		t.Fatal("Sheer Force debería ser válida en gen 5")
-	}
-	if !habilidadEnFilas(filas, 5, "Sand Force") {
-		t.Fatal("las habilidades ocultas deberían contar")
-	}
-	if habilidadEnFilas(filas, 4, "No Existe") {
-		t.Fatal("una habilidad inexistente no puede ser válida")
+	for _, caso := range casos {
+		t.Run(caso.nombre, func(t *testing.T) {
+			cat, mock := catalogoFalsoSQL(t)
+			caso.preparar(mock)
+			existe, valida, err := cat.HabilidadValida(context.Background(), 4, caso.especie, "Levitate")
+			if existe != caso.existe || valida != caso.valida || (err != nil) != caso.conError {
+				t.Fatalf("existe=%v valida=%v err=%v", existe, valida, err)
+			}
+		})
 	}
 }
