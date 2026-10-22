@@ -110,13 +110,19 @@ pipeline {
     stage('Trivy (paralelo)') {
       agent { label 'srv01' }
       steps {
-        // Se descarga la base de datos una vez y las tres ramas la comparten.
+        // Se descarga la base de datos una vez y las tres ramas la comparten:
+        // Trivy la abre en solo lectura, así que admite varios procesos.
         sh '''
           docker run --rm \
             -v poketeam-trivy-cache:/root/.cache/ \
             aquasec/trivy:latest image --download-db-only
         '''
         script {
+          // --cache-backend memory: la caché de escaneo en disco (fanal.db) se
+          // abre en exclusiva y, con las tres ramas en el mismo volumen, las
+          // que no la consiguen en 5 s mueren con «cache may be in use by
+          // another process». Tampoco sirve de nada: el volumen se borra al
+          // terminar la stage.
           def escanear = { String imagen ->
             withCredentials([usernamePassword(credentialsId: env.REGISTRO_CREDENCIAL,
                                               usernameVariable: 'TRIVY_USERNAME',
@@ -132,6 +138,7 @@ pipeline {
                   '--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL ' +
                   '--ignore-unfixed ' +
                   '--skip-db-update ' +
+                  '--cache-backend memory ' +
                   '--timeout 15m ' +
                   '--exit-code 1 ' +
                   "${imagen}:latest",
