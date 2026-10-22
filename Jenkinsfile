@@ -67,25 +67,26 @@ pipeline {
       agent { label 'srv01' }
       steps {
         script {
-          // Las tres imágenes se construyen a la vez en este sandbox: con
-          // los recursos por defecto, el compilador de Go se queda sin memoria.
-          sandbox = prepareDaytona(cpu: 4, memory: 8, disk: 30)
+          // Las imágenes amd64 se construyen de una en una en este sandbox. Daytona
+          // no admite recursos al crear desde un snapshot: CPU, memoria y
+          // disco se fijan en el snapshot mlib-dind (ver docs/despliegue.md).
+          sandbox = prepareDaytona()
           echo "Sandbox Daytona: ${sandbox}"
         }
       }
     }
 
-    // Cada componente en paralelo; dentro de cada uno, linux/arm64 en srv01 y
-    // linux/amd64 en el sandbox, también en paralelo. Al terminar se publica
-    // el manifiesto multiarquitectura en ghcr.io (:latest y :<commit>).
-    stage('Construir y subir imágenes (paralelo)') {
+    // Un componente detrás de otro: el sandbox de Daytona tiene como mucho
+    // 10 GB de disco y no da para tres builds a la vez. Dentro de cada
+    // componente, buildMultiArchImage construye en paralelo linux/arm64 en
+    // srv01 y linux/amd64 en el sandbox, y publica el manifiesto en ghcr.io
+    // (:latest y :<commit>).
+    stage('Construir y subir imágenes') {
       steps {
         script {
-          def ramas = [:]
-          for (String n : IMAGENES.keySet()) {
-            def nombre = n
-            def cfg = IMAGENES[n]
-            ramas[nombre] = {
+          for (String nombre : IMAGENES.keySet()) {
+            def cfg = IMAGENES[nombre]
+            stage(nombre) {
               def refs = buildMultiArchImage(
                 image: cfg.image,
                 context: cfg.context,
@@ -99,8 +100,6 @@ pipeline {
               echo "${nombre}: ${refs.join(', ')}"
             }
           }
-          ramas.failFast = true
-          parallel(ramas)
         }
       }
     }

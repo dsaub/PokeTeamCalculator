@@ -96,10 +96,14 @@ pendientes de MariaDB en orden de creación) y después el worker nuevo.
   componente en `srv01` (SonarQube con `api/`, `worker/` y
   `web/sonar-project.properties`, Hadolint para los tres Dockerfiles y Gitleaks
   global). Después crea un sandbox x86_64 de Daytona (`prepareDaytona`,
-  credencial *Secret text* `daytona-token`) y construye las tres imágenes **en
-  paralelo** con `buildMultiArchImage`: `linux/arm64` en `srv01` y
-  `linux/amd64` en el sandbox, sin emulación QEMU. Cada imagen se publica en
+  credencial *Secret text* `daytona-token`) y construye las tres imágenes **una tras otra** con `buildMultiArchImage`;
+  dentro de cada una, `linux/arm64` en `srv01` y `linux/amd64` en el sandbox
+  van en paralelo, sin emulación QEMU. Cada imagen se publica en
   GHCR (`:latest` y `:<commit>`, credencial `github-pat`).
+- El snapshot `mlib-dind` lleva los recursos del sandbox (Daytona no admite
+  `--cpu/--memory/--disk` al crear desde un snapshot). Las imágenes amd64 se
+  compilan de una en una; conviene al menos 4 CPU y 8 GB (el disco tiene un máximo de 10 GB por sandbox):
+  `daytona snapshot create mlib-dind --image docker:28.3.3-dind --cpu 4 --memory 8 --disk 10`.
 - Trivy escanea después las imágenes publicadas, en paralelo y leyéndolas del
   registro. **Falla el pipeline** si encuentra cualquier vulnerabilidad con
   corrección disponible (todas las severidades); las que aún no tienen parche se
