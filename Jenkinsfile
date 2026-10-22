@@ -67,7 +67,9 @@ pipeline {
       agent { label 'srv01' }
       steps {
         script {
-          sandbox = prepareDaytona()
+          // Las tres imágenes se construyen a la vez en este sandbox: con
+          // los recursos por defecto, el compilador de Go se queda sin memoria.
+          sandbox = prepareDaytona(cpu: 4, memory: 8, disk: 30)
           echo "Sandbox Daytona: ${sandbox}"
         }
       }
