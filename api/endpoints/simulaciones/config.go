@@ -2,22 +2,20 @@ package simulaciones
 
 import (
 	"fmt"
-	"net"
 	"net/netip"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Config contiene la configuración propia de simulaciones. La conexión a
 // MariaDB se reutiliza de database.Initialize (DB_*), así que aquí no hay DSN.
 type Config struct {
-	TokenInterno            string
-	URLWorker               string
-	HostInterno             string
-	PuertoInterno           string
+	URLRedis                string
+	LatidoCaducadoWorker    time.Duration
 	SecretoCookie           []byte
 	Simulaciones            int
 	AleatoriedadRival       float64
@@ -33,15 +31,13 @@ type Config struct {
 }
 
 func LoadConfig() (Config, error) {
-	cfg := Config{
-		TokenInterno:  os.Getenv("TOKEN_INTERNO"),
-		URLWorker:     getEnv("URL_WORKER", "http://127.0.0.1:7070"),
-		HostInterno:   getEnv("HOST_INTERNO", "127.0.0.1"),
-		PuertoInterno: getEnv("PUERTO_INTERNO", "8081"),
-	}
+	cfg := Config{URLRedis: strings.TrimSpace(os.Getenv("REDIS_URL"))}
 
-	if len(cfg.TokenInterno) < 16 {
-		return Config{}, fmt.Errorf("TOKEN_INTERNO es obligatoria y debe tener al menos 16 caracteres")
+	if cfg.URLRedis == "" {
+		return Config{}, fmt.Errorf("REDIS_URL es obligatoria (por ejemplo redis://:clave@127.0.0.1:6379/0)")
+	}
+	if _, err := redis.ParseURL(cfg.URLRedis); err != nil {
+		return Config{}, fmt.Errorf("REDIS_URL debe ser una URL redis:// o rediss:// válida")
 	}
 	secreto := os.Getenv("SECRETO_COOKIE")
 	if len(secreto) < 32 {
@@ -49,18 +45,10 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.SecretoCookie = []byte(secreto)
 
-	if _, err := netip.ParseAddr(cfg.HostInterno); err != nil {
-		return Config{}, fmt.Errorf("HOST_INTERNO debe ser una IP válida (por ejemplo 127.0.0.1 o 0.0.0.0)")
+	var err error
+	if cfg.LatidoCaducadoWorker, err = envDur("LATIDO_CADUCADO_WORKER", 15*time.Second, true); err != nil {
+		return Config{}, err
 	}
-	puerto, err := strconv.Atoi(cfg.PuertoInterno)
-	if err != nil || puerto < 1 || puerto > 65535 {
-		return Config{}, fmt.Errorf("PUERTO_INTERNO debe ser un puerto entre 1 y 65535")
-	}
-	cfg.URLWorker = strings.TrimRight(cfg.URLWorker, "/")
-	if u, err := url.Parse(cfg.URLWorker); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return Config{}, fmt.Errorf("URL_WORKER debe ser una URL http(s) válida")
-	}
-
 	if cfg.Simulaciones, err = envInt("SIMULACIONES", 300, 1, 2000); err != nil {
 		return Config{}, err
 	}
@@ -96,17 +84,6 @@ func LoadConfig() (Config, error) {
 	}
 
 	return cfg, nil
-}
-
-func (c Config) DireccionInterna() string {
-	return net.JoinHostPort(c.HostInterno, c.PuertoInterno)
-}
-
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 func envInt(key string, fallback, min, max int) (int, error) {

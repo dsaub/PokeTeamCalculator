@@ -53,9 +53,12 @@ type Job struct {
 	Terminado sql.NullTime
 }
 
-type JobConPosicion struct {
-	Job
-	Posicion int
+// Activo es un trabajo pendiente o en proceso, tal como lo necesita la
+// reconciliación con Redis.
+type Activo struct {
+	ID       int64
+	Peticion []byte
+	Intentos int
 }
 
 type CreateInput struct {
@@ -69,7 +72,6 @@ type CreateInput struct {
 
 type CreateOutcome struct {
 	Job          *Job
-	Posicion     int
 	ActivoID     int64
 	Cached       bool
 	Duplicado    bool
@@ -93,14 +95,22 @@ type CleanupCounts struct {
 type Repository interface {
 	CreateOrFind(ctx context.Context, in CreateInput) (CreateOutcome, error)
 	Get(ctx context.Context, id int64) (*Job, error)
-	GetMany(ctx context.Context, ids []int64) ([]JobConPosicion, error)
-	Position(ctx context.Context, id int64) (int, error)
-	PendingPositions(ctx context.Context) (map[int64]int, error)
+	GetMany(ctx context.Context, ids []int64) ([]Job, error)
 	Cancel(ctx context.Context, id int64, usuario string) (CancelOutcome, error)
 	CancelIfPending(ctx context.Context, id int64) (bool, error)
 	LastDurations(ctx context.Context, limit int) ([]time.Duration, error)
 	Cleanup(ctx context.Context, retencion time.Duration) (CleanupCounts, error)
 	ListAbandonedPending(ctx context.Context, antesDe time.Time) ([]int64, error)
+
+	// Estados que publica el worker. Ninguno pisa un estado final.
+	MarcarProcesando(ctx context.Context, id int64, worker string, intentos int) (bool, error)
+	MarcarPendiente(ctx context.Context, id int64, intentos int) (bool, error)
+	Completar(ctx context.Context, id int64, resultado []byte) (bool, error)
+	Fallar(ctx context.Context, id int64, mensaje string) (bool, error)
+
+	// Reconciliación con Redis.
+	ListActivos(ctx context.Context, antesDe time.Time) ([]Activo, error)
+	EstadosDe(ctx context.Context, ids []int64) (map[int64]string, error)
 }
 
 const columnasJob = `id, hash, usuario, peticion, estado, resultado, error, creado, terminado`
@@ -117,10 +127,6 @@ WHERE usuario = ? AND hash = ? AND estado IN ('pendiente','procesando')
 ORDER BY id LIMIT 1`
 
 	queryGet = `SELECT ` + columnasJob + ` FROM simulaciones WHERE id = ?`
-
-	queryPosicion = `SELECT COUNT(*) FROM simulaciones
-WHERE estado = 'pendiente'
-  AND (creado < ? OR (creado = ? AND id < ?))`
 )
 
 type MySQLRepository struct {
@@ -163,13 +169,7 @@ func (r *MySQLRepository) CreateOrFind(ctx context.Context, in CreateInput) (Cre
 	if job, ok, err := getJobMaybe(ctx, conn, queryDuplicado, in.Usuario, in.Hash); err != nil {
 		return CreateOutcome{}, err
 	} else if ok {
-		pos := 0
-		if job.Estado == EstadoPendiente {
-			if pos, err = posicionDe(ctx, conn, job); err != nil {
-				return CreateOutcome{}, err
-			}
-		}
-		return CreateOutcome{Job: job, Posicion: pos, Duplicado: true}, nil
+		return CreateOutcome{Job: job, Duplicado: true}, nil
 	}
 
 	// 3. Límite por usuario.
@@ -218,79 +218,35 @@ func (r *MySQLRepository) CreateOrFind(ctx context.Context, in CreateInput) (Cre
 	if err != nil {
 		return CreateOutcome{}, err
 	}
-	pos, err := posicionDe(ctx, conn, job)
-	if err != nil {
-		return CreateOutcome{}, err
-	}
-	return CreateOutcome{Job: job, Posicion: pos}, nil
+	return CreateOutcome{Job: job}, nil
 }
 
 func (r *MySQLRepository) Get(ctx context.Context, id int64) (*Job, error) {
 	return getJob(ctx, r.db, id)
 }
 
-func (r *MySQLRepository) GetMany(ctx context.Context, ids []int64) ([]JobConPosicion, error) {
+func (r *MySQLRepository) GetMany(ctx context.Context, ids []int64) ([]Job, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := make([]any, len(ids))
-	marcadores := make([]string, len(ids))
-	for i, id := range ids {
-		args[i] = id
-		marcadores[i] = "?"
-	}
-	query := `SELECT s.` + strings.ReplaceAll(columnasJob, ", ", ", s.") + `,
-	CASE WHEN s.estado = 'pendiente' THEN (
-	  SELECT COUNT(*) FROM simulaciones p
-	  WHERE p.estado = 'pendiente'
-	    AND (p.creado < s.creado OR (p.creado = s.creado AND p.id < s.id))
-	) + 1 ELSE 0 END AS posicion
-FROM simulaciones s WHERE s.id IN (` + strings.Join(marcadores, ",") + `)`
-
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	marcadores, args := marcadoresIDs(ids)
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+columnasJob+` FROM simulaciones WHERE id IN (`+marcadores+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	var jobs []JobConPosicion
+	var jobs []Job
 	for rows.Next() {
-		var j JobConPosicion
+		var j Job
 		if err := rows.Scan(&j.ID, &j.Hash, &j.Usuario, &j.Peticion, &j.Estado, &j.Resultado,
-			&j.Error, &j.Creado, &j.Terminado, &j.Posicion); err != nil {
+			&j.Error, &j.Creado, &j.Terminado); err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, j)
 	}
 	return jobs, rows.Err()
-}
-
-func (r *MySQLRepository) Position(ctx context.Context, id int64) (int, error) {
-	job, err := getJob(ctx, r.db, id)
-	if err != nil {
-		return 0, err
-	}
-	return posicionDe(ctx, r.db, job)
-}
-
-func (r *MySQLRepository) PendingPositions(ctx context.Context) (map[int64]int, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT id, ROW_NUMBER() OVER (ORDER BY creado, id) AS posicion
-FROM simulaciones WHERE estado = 'pendiente'`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	posiciones := make(map[int64]int)
-	for rows.Next() {
-		var id int64
-		var pos int
-		if err := rows.Scan(&id, &pos); err != nil {
-			return nil, err
-		}
-		posiciones[id] = pos
-	}
-	return posiciones, rows.Err()
 }
 
 func (r *MySQLRepository) Cancel(ctx context.Context, id int64, usuario string) (CancelOutcome, error) {
@@ -398,6 +354,96 @@ func (r *MySQLRepository) ListAbandonedPending(ctx context.Context, antesDe time
 	return ids, rows.Err()
 }
 
+func (r *MySQLRepository) MarcarProcesando(ctx context.Context, id int64, worker string, intentos int) (bool, error) {
+	return filasCambiadas(r.db.ExecContext(ctx,
+		`UPDATE simulaciones SET estado = 'procesando', iniciado = NOW(3), worker = ?, intentos = ?
+		 WHERE id = ? AND estado IN ('pendiente','procesando')`, worker, intentos, id))
+}
+
+func (r *MySQLRepository) MarcarPendiente(ctx context.Context, id int64, intentos int) (bool, error) {
+	return filasCambiadas(r.db.ExecContext(ctx,
+		`UPDATE simulaciones SET estado = 'pendiente', worker = NULL, intentos = ?
+		 WHERE id = ? AND estado = 'procesando'`, intentos, id))
+}
+
+func (r *MySQLRepository) Completar(ctx context.Context, id int64, resultado []byte) (bool, error) {
+	return filasCambiadas(r.db.ExecContext(ctx,
+		`UPDATE simulaciones SET estado = 'completado', resultado = ?, error = NULL, terminado = NOW(3)
+		 WHERE id = ? AND estado IN ('pendiente','procesando')`, resultado, id))
+}
+
+func (r *MySQLRepository) Fallar(ctx context.Context, id int64, mensaje string) (bool, error) {
+	return filasCambiadas(r.db.ExecContext(ctx,
+		`UPDATE simulaciones SET estado = 'error', error = ?, terminado = NOW(3)
+		 WHERE id = ? AND estado IN ('pendiente','procesando')`, mensaje, id))
+}
+
+// ListActivos devuelve los trabajos pendientes o en proceso creados antes de
+// `antesDe`, por orden de creación.
+func (r *MySQLRepository) ListActivos(ctx context.Context, antesDe time.Time) ([]Activo, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, peticion, intentos FROM simulaciones
+		 WHERE estado IN ('pendiente','procesando') AND creado < ?
+		 ORDER BY creado, id`, antesDe)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var activos []Activo
+	for rows.Next() {
+		var a Activo
+		if err := rows.Scan(&a.ID, &a.Peticion, &a.Intentos); err != nil {
+			return nil, err
+		}
+		activos = append(activos, a)
+	}
+	return activos, rows.Err()
+}
+
+// EstadosDe devuelve el estado de los ids que existen.
+func (r *MySQLRepository) EstadosDe(ctx context.Context, ids []int64) (map[int64]string, error) {
+	estados := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return estados, nil
+	}
+	marcadores, args := marcadoresIDs(ids)
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, estado FROM simulaciones WHERE id IN (`+marcadores+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var id int64
+		var estado string
+		if err := rows.Scan(&id, &estado); err != nil {
+			return nil, err
+		}
+		estados[id] = estado
+	}
+	return estados, rows.Err()
+}
+
+func marcadoresIDs(ids []int64) (string, []any) {
+	args := make([]any, len(ids))
+	marcadores := make([]string, len(ids))
+	for i, id := range ids {
+		args[i] = id
+		marcadores[i] = "?"
+	}
+	return strings.Join(marcadores, ","), args
+}
+
+func filasCambiadas(res sql.Result, err error) (bool, error) {
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 type rowQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
@@ -428,13 +474,4 @@ func getJobMaybe(ctx context.Context, q rowQuerier, query string, args ...any) (
 		return nil, false, err
 	}
 	return job, true, nil
-}
-
-func posicionDe(ctx context.Context, q rowQuerier, job *Job) (int, error) {
-	var antes int
-	err := q.QueryRowContext(ctx, queryPosicion, job.Creado, job.Creado, job.ID).Scan(&antes)
-	if err != nil {
-		return 0, err
-	}
-	return antes + 1, nil
 }

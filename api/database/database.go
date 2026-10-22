@@ -39,7 +39,7 @@ func loadConfig() config {
 }
 
 func Initialize() {
-	setStatus("starting")
+	SetStatus("starting")
 	cfg := loadConfig()
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=true&tls=%s",
@@ -60,9 +60,9 @@ func Initialize() {
 		log.Fatalf("Error al comprobar la base de datos: %v", err)
 	}
 	if populated {
-		setStatus("ok")
+		SetStatus("ok")
 	} else {
-		setStatus("error")
+		SetStatus("error")
 		log.Println("Error, database is NOT initialized")
 	}
 
@@ -102,7 +102,8 @@ func GetStatus() string {
 	return status
 }
 
-func setStatus(statusn string) {
+// SetStatus fija el estado que devuelve GetStatus (lo usa /api/salud).
+func SetStatus(statusn string) {
 	statusMu.Lock()
 	defer statusMu.Unlock()
 	status = statusn

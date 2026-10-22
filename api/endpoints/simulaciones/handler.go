@@ -169,7 +169,7 @@ func (h *Handler) cancelar(c *gin.Context) {
 		}
 		return
 	}
-	h.rt.PublishCancel(id)
+	h.rt.PublishCancel(c.Request.Context(), id)
 	c.Status(http.StatusNoContent)
 }
 
@@ -239,15 +239,22 @@ func (h *Handler) eventos(c *gin.Context) {
 	}
 }
 
+// salud responde 503 solo si falla MariaDB: sin Redis el catálogo funciona y
+// los trabajos se guardan igual (la reconciliación los encola después).
 func (h *Handler) salud(c *gin.Context) {
 	estado := database.GetStatus()
 	codigo := http.StatusOK
 	if estado != "ok" {
 		codigo = http.StatusServiceUnavailable
 	}
+	cola := "ok"
+	if !h.svc.ColaResponde(c.Request.Context()) {
+		cola = "error"
+	}
 	c.JSON(codigo, gin.H{
 		"status":           estado,
 		"baseDatos":        estado,
+		"cola":             cola,
 		"workerDisponible": h.svc.WorkerDisponible(),
 	})
 }

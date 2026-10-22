@@ -31,63 +31,54 @@ func main() {
 		os.Exit(1)
 	}
 
-	worker := simulaciones.NewWorkerClient(cfg.URLWorker, cfg.TokenInterno, logger)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	rdb, err := simulaciones.ClienteRedis(cfg.URLRedis)
+	if err != nil {
+		logger.Error("configuración inválida", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = rdb.Close() }()
+	cola := simulaciones.NewColaRedis(rdb, cfg.LatidoCaducadoWorker, logger)
+	// Sin Redis la API arranca igual: los trabajos se guardan en MariaDB y la
+	// reconciliación los encola cuando vuelva.
+	if err := cola.Esperar(ctx, 15, 2*time.Second); err != nil {
+		logger.Error("cola_no_disponible", "error", err)
+	}
+
 	repo := simulaciones.NewMySQLRepository(database.GetDatabase())
 	catalog := simulaciones.NewMySQLCatalog(database.GetDatabase())
-	svc := simulaciones.NewService(repo, cfg, worker, logger, catalog)
+	svc := simulaciones.NewService(repo, cfg, cola, logger, catalog)
 	hub := simulaciones.NewHub()
-	rt := simulaciones.NewRealtime(hub, svc, cfg.IntervaloSondeoSSE, logger)
+	rt := simulaciones.NewRealtime(hub, svc, cola, cfg.IntervaloSondeoSSE, logger)
+	estados := simulaciones.NewEstados(cola, svc, rt, logger)
 	handler := simulaciones.NewHandler(svc, rt, cfg, logger)
-	internal := simulaciones.NewInternalHandler(svc, rt, cfg.TokenInterno, logger)
 
 	catalogoSvc := catalogo.NewService(catalogo.NewMySQLRepository(database.GetDatabase()))
 	catalogoHandler := catalogo.NewHandler(catalogoSvc, logger)
 
-	router := gin.Default()
-	router.HandleMethodNotAllowed = true
-	router.GET("/api/v1/pokemon", pokemons.GetAllPokemons)
-	router.GET("/api/v1/pokemon/:id", pokemons.GetPokemonByID)
-	handler.Register(router)
-	catalogoHandler.Register(router)
-	router.NoRoute(codehandlers.ErrorNotFound)
-	router.NoMethod(codehandlers.ErrorMethodNotAllowed)
-
-	puerto := os.Getenv("PORT")
-	if puerto == "" {
-		puerto = "8080"
-	}
+	router := nuevoRouter(handler, catalogoHandler)
 
 	// Sin WriteTimeout: las conexiones SSE son de larga duración.
 	publico := &http.Server{
-		Addr:              ":" + puerto,
+		Addr:              ":" + puerto(),
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	interno := &http.Server{
-		Addr:              cfg.DireccionInterna(),
-		Handler:           internal,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	go worker.Run(ctx)
+	go cola.Run(ctx)
+	go estados.Run(ctx)
+	go rt.Escuchar(ctx)
+	go rt.ReconciliarLoop(ctx)
 	go handler.RateLimiter().Run(ctx)
 	go rt.Run(ctx)
 	go rt.CancelAbandonedLoop(ctx)
 	go rt.CleanupLoop(ctx)
 
-	errores := make(chan error, 2)
+	errores := make(chan error, 1)
 	go func() {
 		logger.Info("api_escuchando", "direccion", publico.Addr)
 		if err := publico.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errores <- err
-		}
-	}()
-	go func() {
-		logger.Info("api_interna_escuchando", "direccion", interno.Addr)
-		if err := interno.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errores <- err
 		}
 	}()
@@ -99,7 +90,8 @@ func main() {
 		logger.Error("servidor", "error", err)
 	}
 
-	// Cerrar SSE y goroutines periódicas; después, los dos servidores.
+	// Cerrar SSE y goroutines periódicas; después, el servidor. El cliente de
+	// Redis se cierra al salir.
 	hub.Close()
 	stop()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -107,7 +99,31 @@ func main() {
 	if err := publico.Shutdown(shutdownCtx); err != nil {
 		logger.Error("apagado_api", "error", err)
 	}
-	if err := interno.Shutdown(shutdownCtx); err != nil {
-		logger.Error("apagado_api_interna", "error", err)
+}
+
+// modulo es un grupo de rutas que se registra en el router (simulaciones, catálogo).
+type modulo interface {
+	Register(r *gin.Engine)
+}
+
+// nuevoRouter monta todas las rutas de la API y las respuestas 404 y 405.
+func nuevoRouter(modulos ...modulo) *gin.Engine {
+	router := gin.Default()
+	router.HandleMethodNotAllowed = true
+	router.GET("/api/v1/pokemon", pokemons.GetAllPokemons)
+	router.GET("/api/v1/pokemon/:id", pokemons.GetPokemonByID)
+	for _, m := range modulos {
+		m.Register(router)
 	}
+	router.NoRoute(codehandlers.ErrorNotFound)
+	router.NoMethod(codehandlers.ErrorMethodNotAllowed)
+	return router
+}
+
+// puerto devuelve PORT o, si no está definida, 8080.
+func puerto() string {
+	if p := os.Getenv("PORT"); p != "" {
+		return p
+	}
+	return "8080"
 }

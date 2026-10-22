@@ -40,12 +40,15 @@ func (s *Subscriber) enviar(ev Event) {
 	}
 }
 
+// posicionCambiada también es true si el trabajo vuelve a la cola después de
+// `procesando` (un reintento), aunque la posición coincida con la última.
 func (s *Subscriber) posicionCambiada(pos int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.lastPos == pos {
+	if s.closed || (s.lastEstado == EstadoPendiente && s.lastPos == pos) {
 		return false
 	}
+	s.lastEstado = EstadoPendiente
 	s.lastPos = pos
 	return true
 }
@@ -70,9 +73,9 @@ func (s *Subscriber) marcarFinal() bool {
 	return true
 }
 
-// Hub vive en un solo proceso. Si algún día hay varias instancias de la API,
-// cada una tendrá su propio hub y el sondeo de respaldo seguirá cubriendo los
-// callbacks que no lleguen a esta instancia.
+// Hub vive en un solo proceso. Con varias instancias de la API, cada una
+// tiene el suyo: los cambios que aplica otra llegan por Redis (Realtime.Escuchar)
+// y el sondeo de respaldo cubre los avisos perdidos.
 type Hub struct {
 	mu       sync.Mutex
 	jobs     map[int64]map[*Subscriber]struct{}

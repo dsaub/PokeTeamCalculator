@@ -5,18 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"sync"
 	"time"
 )
-
-// Waker avisa al worker de que hay trabajo nuevo. La implementación real
-// lanza una goroutine con timeout de 1 s y nunca bloquea la petición.
-type Waker interface {
-	Wake()
-	Disponible() bool
-}
 
 type CreateResponse struct {
 	ID               int64
@@ -41,20 +35,20 @@ type JobView struct {
 type Service struct {
 	repo    Repository
 	cfg     Config
-	waker   Waker
+	cola    *ColaRedis
 	est     *Estimator
 	logger  *slog.Logger
 	catalog Catalog
 }
 
-func NewService(repo Repository, cfg Config, waker Waker, logger *slog.Logger, cataloges ...Catalog) *Service {
+func NewService(repo Repository, cfg Config, cola *ColaRedis, logger *slog.Logger, cataloges ...Catalog) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	svc := &Service{
 		repo:   repo,
 		cfg:    cfg,
-		waker:  waker,
+		cola:   cola,
 		est:    NewEstimator(repo, cfg.TrabajosSimultaneos),
 		logger: logger,
 	}
@@ -115,18 +109,18 @@ func (s *Service) Create(ctx context.Context, usuario string, p Peticion) (Creat
 		}, nil
 
 	case out.Duplicado:
-		est := 0
-		if out.Job.Estado == EstadoPendiente && out.Posicion > 0 {
-			est = s.EstimateSeconds(ctx, out.Posicion)
+		pos := 0
+		if out.Job.Estado == EstadoPendiente {
+			pos = s.posicion(ctx, out.Job.ID)
 		}
 		s.logger.Info("simulacion_creada", "id", out.Job.ID, "cache", false, "duplicada", true)
 		return CreateResponse{
 			ID:               out.Job.ID,
 			Estado:           out.Job.Estado,
-			Posicion:         out.Posicion,
-			EstimadoSegundos: est,
+			Posicion:         pos,
+			EstimadoSegundos: s.EstimateSeconds(ctx, pos),
 			Duplicado:        true,
-			WorkerDisponible: s.waker.Disponible(),
+			WorkerDisponible: s.workerDisponibleAhora(ctx),
 		}, nil
 
 	case out.LimitUsuario:
@@ -136,19 +130,27 @@ func (s *Service) Create(ctx context.Context, usuario string, p Peticion) (Creat
 		return CreateResponse{}, ErrLimiteGlobal
 	}
 
-	// Nuevo trabajo: despertar al worker en segundo plano.
-	s.waker.Wake()
-	disponible := s.waker.Disponible()
+	// Nuevo trabajo: al final de la cola de Redis. Si Redis falla, el trabajo
+	// ya está en MariaDB y lo encolará la reconciliación.
+	disponible := s.workerDisponibleAhora(ctx)
+	pos, err := s.cola.Encolar(ctx, out.Job.ID, out.Job.Peticion, 0)
+	if err != nil {
+		s.logger.Error("cola_no_disponible", "id", out.Job.ID, "error", err)
+		disponible = false
+	}
+	if pos == 0 {
+		// Ya estaba encolado (la reconciliación se adelantó) o Redis no responde.
+		pos = s.posicion(ctx, out.Job.ID)
+	}
 	if !disponible {
 		s.logger.Warn("worker_no_disponible", "id", out.Job.ID)
 	}
-	est := s.EstimateSeconds(ctx, out.Posicion)
 	s.logger.Info("simulacion_creada", "id", out.Job.ID, "cache", false, "duplicada", false)
 	return CreateResponse{
 		ID:               out.Job.ID,
 		Estado:           out.Job.Estado,
-		Posicion:         out.Posicion,
-		EstimadoSegundos: est,
+		Posicion:         pos,
+		EstimadoSegundos: s.EstimateSeconds(ctx, pos),
 		WorkerDisponible: disponible,
 	}, nil
 }
@@ -179,8 +181,8 @@ func (s *Service) GetByID(ctx context.Context, id int64) (*JobView, error) {
 	return s.view(ctx, job)
 }
 
-// GetJob devuelve la fila cruda; lo usa el callback interno, que no tiene
-// usuario y necesita el resultado/error originales.
+// GetJob devuelve la fila cruda; lo usa el SSE (Realtime.Refrescar), que no
+// tiene usuario y necesita el resultado/error originales.
 func (s *Service) GetJob(ctx context.Context, id int64) (*Job, error) {
 	job, err := s.repo.Get(ctx, id)
 	if err != nil {
@@ -199,15 +201,8 @@ func (s *Service) view(ctx context.Context, job *Job) (*JobView, error) {
 	}
 	switch job.Estado {
 	case EstadoPendiente:
-		pos, err := s.repo.Position(ctx, job.ID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil, ErrNoEncontrado
-			}
-			return nil, err
-		}
-		v.Posicion = pos
-		v.EstimadoSegundos = s.EstimateSeconds(ctx, pos)
+		v.Posicion = s.posicion(ctx, job.ID)
+		v.EstimadoSegundos = s.EstimateSeconds(ctx, v.Posicion)
 	case EstadoCompletado:
 		v.Resultado = job.Resultado
 	case EstadoError:
@@ -228,19 +223,71 @@ func (s *Service) Cancel(ctx context.Context, id int64, usuario string) error {
 		return ErrYaTerminado
 	}
 	s.logger.Info("simulacion_cancelada", "id", id)
+	s.cancelarEnCola(ctx, id)
 	return nil
 }
 
 func (s *Service) CancelIfPending(ctx context.Context, id int64) (bool, error) {
-	return s.repo.CancelIfPending(ctx, id)
+	ok, err := s.repo.CancelIfPending(ctx, id)
+	if ok {
+		s.cancelarEnCola(ctx, id)
+	}
+	return ok, err
 }
 
-func (s *Service) GetMany(ctx context.Context, ids []int64) ([]JobConPosicion, error) {
+// cancelarEnCola avisa al worker por Redis. Si Redis falla, el trabajo ya está
+// cancelado en MariaDB: la reconciliación lo sacará de la cola y la API
+// ignorará su resultado.
+func (s *Service) cancelarEnCola(ctx context.Context, id int64) {
+	if err := s.cola.Cancelar(ctx, id); err != nil {
+		s.logger.Warn("cancelar_en_cola", "id", id, "error", err)
+	}
+}
+
+func (s *Service) GetMany(ctx context.Context, ids []int64) ([]Job, error) {
 	return s.repo.GetMany(ctx, ids)
 }
 
-func (s *Service) PendingPositions(ctx context.Context) (map[int64]int, error) {
-	return s.repo.PendingPositions(ctx)
+// Posiciones devuelve la posición en la cola de cada trabajo pendiente.
+func (s *Service) Posiciones(ctx context.Context) (map[int64]int, error) {
+	return s.cola.Posiciones(ctx)
+}
+
+// posicion devuelve la posición de un trabajo pendiente. Si Redis no lo tiene
+// en la cola (un worker acaba de tomarlo y aún no ha llegado su `procesando`)
+// o no responde, se da como el siguiente.
+func (s *Service) posicion(ctx context.Context, id int64) int {
+	posiciones, err := s.cola.Posiciones(ctx)
+	if err != nil {
+		s.logger.Warn("posicion_no_disponible", "id", id, "error", err)
+		return 1
+	}
+	return max(posiciones[id], 1)
+}
+
+// AplicarEstado lleva a MariaDB un cambio que publicó el worker. Devuelve
+// true si la fila cambió.
+func (s *Service) AplicarEstado(ctx context.Context, ev EventoWorker) (bool, error) {
+	switch ev.Tipo {
+	case EstadoProcesando:
+		return s.repo.MarcarProcesando(ctx, ev.ID, ev.Worker, ev.Intentos)
+	case EstadoPendiente:
+		return s.repo.MarcarPendiente(ctx, ev.ID, ev.Intentos)
+	case EstadoCompletado:
+		return s.repo.Completar(ctx, ev.ID, ev.Resultado)
+	case EstadoError:
+		return s.repo.Fallar(ctx, ev.ID, ev.Error)
+	default:
+		return false, fmt.Errorf("tipo de estado desconocido: %q", ev.Tipo)
+	}
+}
+
+func (s *Service) Activos(ctx context.Context, antesDe time.Time) ([]Activo, error) {
+	return s.repo.ListActivos(ctx, antesDe)
+}
+
+func (s *Service) EstadosDe(ctx context.Context, ids []int64) (map[int64]string, error) {
+	return s.repo.EstadosDe(ctx, ids)
 }
 
 func (s *Service) AbandonedPending(ctx context.Context, antesDe time.Time) ([]int64, error) {
@@ -256,7 +303,18 @@ func (s *Service) EstimateSeconds(ctx context.Context, posicion int) int {
 }
 
 func (s *Service) WorkerDisponible() bool {
-	return s.waker.Disponible()
+	return s.cola.Disponible()
+}
+
+// workerDisponibleAhora repite la comprobación si la última no vio ningún
+// worker: uno que acaba de arrancar tarda hasta 15 s en aparecer en ella.
+func (s *Service) workerDisponibleAhora(ctx context.Context) bool {
+	return s.cola.Disponible() || s.cola.Comprobar(ctx)
+}
+
+// ColaResponde indica si Redis contesta ahora mismo.
+func (s *Service) ColaResponde(ctx context.Context) bool {
+	return s.cola.Ping(ctx) == nil
 }
 
 // Estimator guarda en memoria la duración media de los últimos 20 trabajos
