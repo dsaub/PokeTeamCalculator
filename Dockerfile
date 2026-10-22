@@ -1,7 +1,7 @@
 FROM ubuntu:26.04 AS security_provider
 RUN useradd nonroot
 
-FROM golang:1.27.2-alpine AS builder_app
+FROM golang:1.27.3-alpine AS builder_app
 ENV CGO_ENABLED=0
 RUN mkdir -pv /build
 WORKDIR /build
