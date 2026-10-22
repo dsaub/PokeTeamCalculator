@@ -13,11 +13,9 @@ todos los secretos.
 | `DB_HOST` / `DB_PORT` | no | `127.0.0.1` / `3306` | MariaDB. En Compose, `db`. |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | no | `pokedata` / vacío / `pokedata` | Credenciales. |
 | `DB_TLS` | no | `preferred` | `preferred`, `true`, `skip-verify` o `false`. |
-| `TOKEN_INTERNO` | sí (16+) | | Secreto compartido con el worker. |
+| `REDIS_URL` | sí | | `redis://:clave@host:6379/0`. En Compose la arma con `REDIS_PASSWORD`. |
 | `SECRETO_COOKIE` | sí (32+ bytes) | | Firma de la cookie `sid`. |
-| `URL_WORKER` | no | `http://127.0.0.1:7070` | Despertar al worker. |
-| `PUERTO_INTERNO` | no | `8081` | Callback del worker. |
-| `HOST_INTERNO` | no | `127.0.0.1` | En Compose, `0.0.0.0`. |
+| `LATIDO_CADUCADO_WORKER` | no | `15s` | Un worker cuenta como disponible si su último latido es más reciente. |
 | `PROXIES_CONFIABLES` | no | vacío | IPs/CIDR que pueden enviar `X-Forwarded-For`. |
 
 El resto (`SIMULACIONES`, `MAX_COLA`, `CACHE_TTL`, `LIMITE_POR_MINUTO`…) está
@@ -27,13 +25,18 @@ documentado en [api/simulaciones.md](api/simulaciones.md).
 
 | Variable | Obligatoria | Por defecto | Uso |
 |---|---|---|---|
-| `DATABASE_URL` | sí | | `mysql://usuario:clave@host:3306/bd`. |
-| `TOKEN_INTERNO` | sí (16+) | | Debe coincidir con la API. |
-| `URL_CALLBACK` | sí | | `http://api:8081` en Compose; `http://127.0.0.1:8081` en local. |
-| `HOST_WORKER` | no | `127.0.0.1` | IP del servidor interno; en Compose, `0.0.0.0`. |
-| `PUERTO` | no | `7070` | Servidor interno del worker. |
+| `REDIS_URL` | sí | | La misma que la API. |
 | `HILOS` | no | núcleos − 1 | Hilos de simulación. |
 | `TRABAJOS_SIMULTANEOS` | no | `2` | Trabajos en paralelo. |
+
+En Compose el worker no lee el `.env` entero: recibe solo `REDIS_URL` y sus
+propias variables, así que no tiene las credenciales de MariaDB.
+
+### Redis
+
+| Variable | Obligatoria | Por defecto | Uso |
+|---|---|---|---|
+| `REDIS_PASSWORD` | no | `change-me-redis` | Contraseña del contenedor `redis`. Va dentro de `REDIS_URL`: sin `@`, `:`, `/` ni `?`. |
 
 El resto está en [worker.md](worker.md).
 
@@ -43,10 +46,11 @@ El resto está en [worker.md](worker.md).
 
 | Servicio | Imagen / build | Puerto |
 |---|---|---|
-| `db` | `mariadb:11.4` | 3306 |
+| `db` | `mariadb:11.4` | 3306 (solo `127.0.0.1`) |
+| `redis` | `redis:8.10-alpine`, con AOF y contraseña | 6379 (solo `127.0.0.1`) |
 | `migrator` | `mariadb:11.4` + `migraciones/aplicar.sh` | — |
 | `api` | `Dockerfile` (raíz, contexto `api/`) | 8080 |
-| `worker` | `worker/Dockerfile` | interno 7070 |
+| `worker` | `worker/Dockerfile` | — |
 | `web` | `web/Dockerfile` + nginx | `${WEB_PORT:-80}` |
 
 ```sh
@@ -67,35 +71,51 @@ docker compose run --rm migrator
 
 ## Desarrollo sin Docker
 
-1. MariaDB 10.6+ con la base y el usuario de `.env`.
-2. `cd api && go run ./main.go`
-3. `cd worker && bun src/index.ts` (con `worker/.env` o variables exportadas)
+1. MariaDB 10.6+ con la base y el usuario de `.env`, y Redis 6.2+ (o
+   `docker compose up -d db redis`).
+2. `cd api && go run ./main.go` (con las variables exportadas, incluida
+   `REDIS_URL=redis://:change-me-redis@127.0.0.1:6379/0`)
+3. `cd worker && bun src/index.ts` (con la misma `REDIS_URL` en `worker/.env` o
+   exportada)
 4. `cd web && bun run dev`
 
-En local, `URL_CALLBACK` debe ser `http://127.0.0.1:8081`; el puerto `8080` es
-el público y no tiene la ruta `/interno`.
+### Actualizar desde la cola en MariaDB
+
+No mezcles el worker antiguo (que lee MariaDB) con la API nueva: procesarían los
+mismos trabajos dos veces. Para el worker antiguo (con `SIGTERM` devuelve lo que
+tenga a `pendiente`), arranca la API nueva (la reconciliación pasa a Redis los
+pendientes de MariaDB en orden de creación) y después el worker nuevo.
+`docker compose up --build` lo hace todo de una vez.
 
 ## CI
 
 - `.github/workflows/docker-trivy.yml`: tests de Go, worker y web; build de la
-  imagen de la API y escaneo con Trivy.
-- `Jenkinsfile` (raíz): análisis de seguridad **en paralelo** por componente
-  (SonarQube con `api/`, `worker/` y `web/sonar-project.properties`, Hadolint
-  para los tres Dockerfiles y Gitleaks global), build multi-arquitectura de las
-  tres imágenes, Trivy en paralelo y push a GHCR. Trivy **falla el pipeline**
-  si encuentra cualquier vulnerabilidad con corrección disponible en una
-  versión posterior (todas las severidades); las que aún no tienen parche se
-  ignoran con `--ignore-unfixed`.
-- El `post { always }` del `Jenkinsfile` limpia al terminar: elimina las tres
-  imágenes construidas, purga imágenes sin usar de más de 24 h, borra la caché
-  de BuildKit y el volumen de caché de Trivy, y ejecuta `cleanWs()`. No toca
-  volúmenes de datos ajenos.
+  imagen de la API y escaneo con Trivy. El job `checks` levanta un Redis para
+  los tests de la cola del worker (`REDIS_URL_TEST`); los de Go usan miniredis.
+- `Jenkinsfile` (raíz, `agent none`): análisis de seguridad **en paralelo** por
+  componente en `srv01` (SonarQube con `api/`, `worker/` y
+  `web/sonar-project.properties`, Hadolint para los tres Dockerfiles y Gitleaks
+  global). Después crea un sandbox x86_64 de Daytona (`prepareDaytona`,
+  credencial *Secret text* `daytona-token`) y construye las tres imágenes **en
+  paralelo** con `buildMultiArchImage`: `linux/arm64` en `srv01` y
+  `linux/amd64` en el sandbox, sin emulación QEMU. Cada imagen se publica en
+  GHCR (`:latest` y `:<commit>`, credencial `github-pat`).
+- Trivy escanea después las imágenes publicadas, en paralelo y leyéndolas del
+  registro. **Falla el pipeline** si encuentra cualquier vulnerabilidad con
+  corrección disponible (todas las severidades); las que aún no tienen parche se
+  ignoran con `--ignore-unfixed`. Como el push va antes, una imagen vulnerable
+  ya está en GHCR cuando el pipeline falla.
+- El `post { always }` borra **siempre** el sandbox de Daytona, falle o no el
+  build. Cada agente limpia lo suyo: `buildMultiArchImage` ejecuta
+  `cleanDocker()`, y la stage de Trivy borra su volumen de caché y hace
+  `cleanWs()`.
 
 ## Notas de seguridad
 
-- El servidor interno de la API solo debe escuchar en `0.0.0.0` dentro de una
-  red privada de contenedores; nunca publiques `8081`.
-- El worker escucha en `127.0.0.1` en local y en `0.0.0.0` dentro de la red de
-  Compose; no se publica ningún puerto suyo.
-- Cambia `TOKEN_INTERNO`, `SECRETO_COOKIE`, `DB_PASSWORD` y
+- La API y el worker no se hablan por HTTP: no hay puertos internos que
+  proteger. El worker no escucha en ningún puerto.
+- Redis solo se publica en `127.0.0.1`; nunca expongas `6379` fuera del host.
+- El worker no tiene credenciales de MariaDB: si se compromete, solo alcanza
+  Redis.
+- Cambia `REDIS_PASSWORD`, `SECRETO_COOKIE`, `DB_PASSWORD` y
   `DB_ROOT_PASSWORD` antes de desplegar.

@@ -1,7 +1,8 @@
 # Simulaciones
 
-Módulo de la API que recibe una petición de combate, la encola en MariaDB, informa
-por SSE de la posición y entrega el resultado que produce el worker.
+Módulo de la API que recibe una petición de combate, la guarda en MariaDB, la
+encola en Redis, informa por SSE de la posición y entrega el resultado que publica
+el worker. El contrato de la cola está en [../cola-redis.md](../cola-redis.md).
 
 Los endpoints de catálogo (juegos, líderes, autocompletado y detalle de
 Pokémon) están en [catalogo.md](catalogo.md).
@@ -67,8 +68,8 @@ Respuestas:
 { "id": 98, "estado": "completado", "cache": true, "resultado": { } }
 ```
 
-Si el worker no está disponible, la respuesta `202` añade
-`"workerDisponible": false`. La petición se encola igualmente.
+Si no hay ningún worker con latido reciente (o Redis no responde), la respuesta
+`202` añade `"workerDisponible": false`. La petición se guarda igualmente.
 
 Errores: `400 {"error":"campo: mensaje"}`, `404`, `409` (cancelar algo ya
 terminado), `429` y `503` (cola llena). El `429` por tener una simulación en
@@ -121,19 +122,31 @@ data: {}
 ```
 
 Al conectar se envía el estado actual. Tras un evento final se cierra la
-conexión. Se manda `: ping` cada 15 s. El hub vive en un solo proceso; si algún
-día hay varias instancias, cada una tendrá el suyo y el sondeo de respaldo
-cubrirá los callbacks perdidos.
+conexión. Se manda `: ping` cada 15 s. Si un trabajo vuelve a la cola después de
+`procesando` (un reintento o un worker muerto), se manda otra vez `posicion`.
+
+Cada instancia de la API tiene su hub. Los cambios que aplica otra le llegan por
+Redis (`sim:eventos`) y el sondeo de respaldo cubre los avisos perdidos.
+
+### Salud
+
+`GET /api/salud`
+
+```json
+{ "status": "ok", "baseDatos": "ok", "cola": "ok", "workerDisponible": true }
+```
+
+Responde `503` solo si falla MariaDB. Sin Redis (`"cola": "error"`) el catálogo
+funciona y las simulaciones se guardan; la reconciliación las encola cuando
+Redis vuelve.
 
 ## Variables de entorno
 
 | Variable | Obligatoria | Por defecto |
 |---|---|---|
-| `TOKEN_INTERNO` | sí (mín. 16 caracteres) | — |
-| `URL_WORKER` | no | `http://127.0.0.1:7070` |
-| `PUERTO_INTERNO` | no | `8081` |
-| `HOST_INTERNO` | no | `127.0.0.1` (en Docker, `0.0.0.0`) |
+| `REDIS_URL` | sí | — (`redis://:clave@127.0.0.1:6379/0`) |
 | `SECRETO_COOKIE` | sí (mín. 32 bytes) | — |
+| `LATIDO_CADUCADO_WORKER` | no | `15s` |
 | `SIMULACIONES` | no | `300` |
 | `ALEATORIEDAD_RIVAL` | no | `0.2` |
 | `TRABAJOS_SIMULTANEOS_WORKER` | no | `2` |
@@ -152,23 +165,28 @@ La conexión a MariaDB se reutiliza de `database.Initialize()` (`DB_HOST`,
 
 ## Contrato con el worker
 
-- Tabla: la crea `migraciones/001_simulaciones.sql` (raíz del repositorio). La
-  API solo inserta `hash`, `usuario`, `peticion` y lee/cancela.
+Todo pasa por Redis; las claves, los scripts y los estados están en
+[../cola-redis.md](../cola-redis.md). Desde el lado de la API:
+
+- Tabla: la crea `migraciones/001_simulaciones.sql` (raíz del repositorio). Solo
+  la usa la API: el worker no se conecta a MariaDB.
 - Migraciones propias:
   - `migraciones/002_indices_simulaciones.sql`: índices `idx_usuario_estado` e
     `idx_hash_estado`.
   - `migraciones/003_v_gym_teams_formas.sql`: corrige las formas de
     `v_gym_teams`. Requiere que pokedata haya creado sus vistas.
-- Tras insertar, la API hace `POST ${URL_WORKER}/despertar` con
-  `Authorization: Bearer ${TOKEN_INTERNO}` en segundo plano (timeout 1 s).
-- El worker llama `POST /interno/simulaciones/{id}/lista` sin cuerpo y con el
-  mismo token. La API responde `204` enseguida y avisa al hub SSE.
-- Salud del worker: `GET ${URL_WORKER}/salud` cada 15 s.
-- `URL_CALLBACK` del worker debe apuntar al servidor interno de la API:
-  `http://127.0.0.1:${PUERTO_INTERNO}` en local y `http://api:8081` en
-  Docker Compose. Nunca al puerto público (`8080`).
-- `HOST_INTERNO` permite que el servidor interno escuche en `0.0.0.0` dentro de
-  una red de contenedores. Por defecto solo escucha en `127.0.0.1`.
+- Al crear, la API inserta la fila y ejecuta `encolar`: el trabajo queda al final
+  de `sim:cola`. Si Redis falla, la creación sigue y la reconciliación lo encola
+  después.
+- La API aplica en MariaDB los estados que el worker publica en `sim:estados`
+  (grupo `api`) y los confirma con `XACK` + `XDEL`. Ninguno pisa un estado final.
+- La posición sale de `sim:cola`. Si Redis no la conoce (no responde, o un worker
+  acaba de tomar el trabajo y aún no ha llegado su `procesando`), se da como `1`.
+- Cancelar marca la fila en MariaDB y ejecuta `cancelar` en Redis: el trabajo
+  sale de la cola o, si ya estaba en curso, el worker no publica su resultado.
+- `workerDisponible`: hay algún latido en `sim:workers` más reciente que
+  `LATIDO_CADUCADO_WORKER`. Se comprueba cada 15 s y, si no se veía ningún
+  worker, también al crear.
 
 ### Formas regionales en `v_gym_teams`
 
@@ -223,8 +241,9 @@ cd api
 go test ./...
 ```
 
-Las pruebas con MariaDB se omiten si no existe `DATABASE_DSN_TEST`. Para
-ejecutarlas:
+Las de Redis usan [miniredis](https://github.com/alicebob/miniredis): no hace
+falta ningún servidor. Las pruebas con MariaDB se omiten si no existe
+`DATABASE_DSN_TEST`. Para ejecutarlas:
 
 ```bash
 cd api
@@ -238,12 +257,17 @@ DATABASE_DSN_TEST='usuario:clave@tcp(127.0.0.1:3306)/poketeam_test?parseTime=tru
   comprueban caché, duplicado y límites y se inserta. Es un bloqueo global muy
   corto: serializa las creaciones y evita que dos peticiones simultáneas se
   salten los límites, incluso con varias instancias de la API.
-- **Worker:** el despertar es siempre en segundo plano; si falla solo se
-  registra. La creación no depende de que el worker esté vivo.
-- **SSE:** servidor HTTP sin `WriteTimeout`; el sondeo de respaldo cada
-  `INTERVALO_SONDEO_SSE` cubre el paso a `procesando` y los callbacks perdidos.
+- **Cola:** la creación no depende de Redis ni de que haya un worker vivo: la
+  fila se guarda en MariaDB y, si `encolar` falla, la reconciliación la encola.
+- **Reconciliación:** al arrancar y cada 30 s, con `sim:estados` vacío, la API
+  vuelve a encolar (al final, por orden de creación) los trabajos activos que
+  Redis no conoce y saca de la cola los que ya terminaron.
+- **SSE:** servidor HTTP sin `WriteTimeout`. Los cambios llegan al aplicar los
+  estados del worker y, en las demás réplicas, por Pub/Sub; el sondeo de
+  respaldo cada `INTERVALO_SONDEO_SSE` cubre los avisos perdidos.
 - **Trabajos abandonados:** se cancelan los `pendiente` sin suscriptores SSE y
-  con más de `CANCELAR_SIN_CLIENTE` desde `creado`.
+  con más de `CANCELAR_SIN_CLIENTE` desde `creado`; también salen de la cola de
+  Redis. Con varias réplicas, cada una solo ve sus propios suscriptores.
 - **Limpieza:** cada hora se borran `error`/`cancelado` de más de 7 días y
   `completado` de más de `RETENCION`. Nunca se tocan `pendiente` ni
   `procesando`.

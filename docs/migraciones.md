@@ -5,7 +5,7 @@ aplican **en orden lexicográfico**.
 
 | Archivo | Qué hace | Requisitos |
 |---|---|---|
-| `001_simulaciones.sql` | Crea la tabla `simulaciones` (cola). | MariaDB 10.6+ (`SKIP LOCKED`). |
+| `001_simulaciones.sql` | Crea la tabla `simulaciones`. | MariaDB 10.6+. |
 | `002_indices_simulaciones.sql` | Añade `idx_usuario_estado` e `idx_hash_estado`. | Haber aplicado `001`. |
 | `003_v_gym_teams_formas.sql` | Recrea `v_gym_teams` para conservar las formas regionales. | pokedata importado (`v_gym_battles`, `gym_battle_pokemon`, `pokemon`…). |
 
@@ -37,5 +37,8 @@ docker compose run --rm migrator
   con el siguiente número.
 - pokedata recrea sus vistas al importar: **reaplicar `003`** después de cada
   importación.
-- La API y el worker comparten la misma base; no crear tablas de cola en otros
-  sitios.
+- Solo la API usa la tabla `simulaciones`: el worker no se conecta a MariaDB.
+  La cola vive en Redis (ver [cola-redis.md](cola-redis.md)); la tabla es la
+  fuente de verdad desde la que la API la reconstruye.
+- La columna `latido` ya no se usa (los latidos están en Redis) y `worker` la
+  rellena la API con el id del worker que tomó el trabajo.
