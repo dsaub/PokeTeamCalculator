@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { nuevoMiembro, type MiembroEquipo } from './equipo.ts'
-import { validarEquipo, validarMiembro } from './validacion.ts'
+import { totalEvs, validarEquipo, validarMiembro } from './validacion.ts'
 
 function miembro(cambios: Partial<MiembroEquipo> = {}): MiembroEquipo {
   return { ...nuevoMiembro({ especie: 'Monferno', nombre: 'Monferno', tipos: ['Fire', 'Fighting'] }), movimientos: ['Ember'], ...cambios }
@@ -67,5 +67,20 @@ describe('validarEquipo', () => {
     expect(r.valido).toBe(false)
     expect(r.porMiembro[0]).toEqual({})
     expect(r.porMiembro[1].movimientos).toBeDefined()
+  })
+})
+
+describe('totalEvs', () => {
+  test('suma solo los enteros válidos', () => {
+    expect(totalEvs('gen4', stats({ hp: '252', atk: ' 4 ', spe: 'x', def: '-3', spa: '1.5' }))).toBe(256)
+  })
+
+  test('en gen 1 no cuenta spd', () => {
+    expect(totalEvs('gen1', stats({ spa: '100', spd: '100' }))).toBe(100)
+    expect(totalEvs('gen2', stats({ spa: '100', spd: '100' }))).toBe(200)
+  })
+
+  test('vacío → 0', () => {
+    expect(totalEvs('gen9', stats({}))).toBe(0)
   })
 })

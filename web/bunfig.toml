@@ -1,0 +1,3 @@
+[test]
+# Registra happy-dom (document, window, EventSource…) antes de cada archivo de tests.
+preload = ["./test/dom.ts"]

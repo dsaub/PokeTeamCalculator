@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { ResultadoPokemon } from '../api/tipos.ts'
-import { explicacionEmpate, fraseRecomendacion, leerRival, porcentaje, tiempoEstimado } from './textos.ts'
+import { decimal, empatados, explicacionEmpate, fraseRecomendacion, leerRival, mensajeDeError, porcentaje, textoPosicion, tiempoEstimado, turnos } from './textos.ts'
 
 const r = (c: Partial<ResultadoPokemon>): ResultadoPokemon => ({
   pokemon: 'Grotle',
@@ -67,4 +67,69 @@ test('leerRival', () => {
   expect(leerRival('Cranidos (Nv. 14)')).toEqual({ especie: 'Cranidos', nivel: 14 })
   expect(leerRival('Mr. Mime (Nv. 5)')).toEqual({ especie: 'Mr. Mime', nivel: 5 })
   expect(leerRival('raro')).toBeNull()
+})
+
+test('decimal: como mucho un decimal y coma', () => {
+  expect(decimal(1.44)).toBe('1,4')
+  expect(decimal(2)).toBe('2')
+  expect(decimal(0.05)).toBe('0,1')
+})
+
+test('turnos: singular y plural', () => {
+  expect(turnos(1)).toBe('1 turno')
+  expect(turnos(2)).toBe('2 turnos')
+  expect(turnos(1.4)).toBe('1,4 turnos')
+})
+
+test('textoPosicion', () => {
+  expect(textoPosicion(1)).toBe('Eres el siguiente en la cola')
+  expect(textoPosicion(0)).toBe('Eres el siguiente en la cola')
+  expect(textoPosicion(2)).toBe('Hay 1 por delante en la cola')
+  expect(textoPosicion(10)).toBe('Hay 9 por delante en la cola')
+})
+
+describe('tiempoEstimado: límites', () => {
+  const casos: [number, string][] = [
+    [Number.NaN, 'un momento'],
+    [Number.POSITIVE_INFINITY, 'un momento'],
+    [-1, 'un momento'],
+    [0, 'unos segundos'],
+    [7.9, 'unos segundos'],
+    [8, 'unos 10 segundos'],
+    [23, 'unos 25 segundos'],
+    [54, 'unos 55 segundos'],
+    [55, 'alrededor de un minuto'],
+    [89, 'alrededor de un minuto'],
+    [90, 'unos 2 minutos'],
+    [600, 'unos 10 minutos'],
+  ]
+  for (const [s, texto] of casos) test(`${s} s → ${texto}`, () => expect(tiempoEstimado(s)).toBe(texto))
+})
+
+test('empatados compara al redondeo mostrado', () => {
+  expect(empatados(r({ winrate: 0.501 }), r({ winrate: 0.499 }))).toBe(true)
+  expect(empatados(r({ winrate: 0.51 }), r({ winrate: 0.49 }))).toBe(false)
+})
+
+test('fraseRecomendacion: sin victorias', () => {
+  expect(fraseRecomendacion(r({ victorias: 0, winrate: 0 }))).toContain('Ninguno de tus Pokémon gana')
+})
+
+test('fraseRecomendacion: gana el 100 % sin aviso', () => {
+  const f = fraseRecomendacion(r({ winrate: 1, turnosMedio: 1 }))
+  expect(f).toStartWith('Gana todos los combates')
+  expect(f).toContain('1 turno.')
+  expect(f).not.toContain('Aun así')
+})
+
+test('leerRival: formatos que no encajan → null', () => {
+  expect(leerRival('Cranidos')).toBeNull()
+  expect(leerRival('Cranidos (Nv. x)')).toBeNull()
+  expect(leerRival('Mr. Mime (Nv. 30)')).toEqual({ especie: 'Mr. Mime', nivel: 30 })
+})
+
+test('mensajeDeError', () => {
+  expect(mensajeDeError(new Error('falló'))).toBe('falló')
+  expect(mensajeDeError('texto suelto')).toBe('Ha ocurrido un error inesperado.')
+  expect(mensajeDeError(undefined)).toBe('Ha ocurrido un error inesperado.')
 })

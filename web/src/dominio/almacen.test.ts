@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { cargarContexto, cargarEquipo, guardarContexto, guardarEquipo, type ContextoSimulacion } from './almacen.ts'
+import {
+  cargarContexto,
+  cargarEquipo,
+  cargarUltimoJuego,
+  guardarContexto,
+  guardarEquipo,
+  guardarUltimoJuego,
+  type ContextoSimulacion,
+} from './almacen.ts'
 import { nuevoMiembro } from './equipo.ts'
 
 function almacenEnMemoria(): Storage {
@@ -80,5 +88,61 @@ describe('contexto de simulación', () => {
     for (let i = 1; i <= 25; i++) guardarContexto(i, ctx, () => a)
     expect(cargarContexto(25, () => a)).not.toBeNull()
     expect(cargarContexto(5, () => a)).toBeNull()
+  })
+})
+
+describe('último juego', () => {
+  test('se guarda y se recupera', () => {
+    const a = almacenEnMemoria()
+    expect(cargarUltimoJuego(() => a)).toBeNull()
+    guardarUltimoJuego('platino', () => a)
+    expect(cargarUltimoJuego(() => a)).toBe('platino')
+  })
+
+  test('un valor que no es texto se ignora', () => {
+    const a = almacenEnMemoria()
+    a.setItem('contrataque:v2:juego', '42')
+    expect(cargarUltimoJuego(() => a)).toBeNull()
+    a.setItem('contrataque:v2:juego', '{roto')
+    expect(cargarUltimoJuego(() => a)).toBeNull()
+  })
+
+  test('si el acceso al almacén lanza, no rompe', () => {
+    const lanza = () => {
+      throw new Error('SecurityError')
+    }
+    expect(() => guardarUltimoJuego('platino', lanza)).not.toThrow()
+    expect(cargarUltimoJuego(lanza)).toBeNull()
+  })
+
+  test('por defecto usa el localStorage del navegador', () => {
+    guardarUltimoJuego('perla')
+    expect(localStorage.getItem('contrataque:v2:juego')).toBe('"perla"')
+    expect(cargarUltimoJuego()).toBe('perla')
+    expect(guardarEquipo('perla', [monferno()])).toBe(true)
+    expect(cargarEquipo('perla')).toHaveLength(1)
+  })
+})
+
+describe('contexto: datos inválidos', () => {
+  test('lista con entradas rotas o contexto incompleto → null', () => {
+    const a = almacenEnMemoria()
+    a.setItem(
+      'contrataque:v2:simulaciones',
+      JSON.stringify([7, [1, { juego: 3 }], [2, { juego: 'platino', nombres: {} }], [3, null]]),
+    )
+    expect(cargarContexto(1, () => a)).toBeNull()
+    expect(cargarContexto(2, () => a)).toBeNull()
+    expect(cargarContexto(3, () => a)).toBeNull()
+    expect(cargarContexto(4, () => a)).toBeNull()
+  })
+
+  test('no es una lista → null, y guardar la reemplaza', () => {
+    const a = almacenEnMemoria()
+    a.setItem('contrataque:v2:simulaciones', '{"no":"lista"}')
+    expect(cargarContexto(1, () => a)).toBeNull()
+    const ctx = { juego: 'platino', lider: 'Roark', rival: 0, peticion: {}, nombres: {} } as unknown as ContextoSimulacion
+    guardarContexto(1, ctx, () => a)
+    expect(cargarContexto(1, () => a)).toEqual(ctx)
   })
 })

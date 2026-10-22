@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { Resultado } from '../api/tipos.ts'
-import { ESTADO_INICIAL, reducir, type Accion, type EstadoMaquina } from './maquina.ts'
+import { enCurso, esTerminal, ESTADO_INICIAL, faseDeEstado, reducir, type Accion, type EstadoMaquina, type Fase } from './maquina.ts'
 
 const resultado: Resultado = { gen: 'gen4', rival: 'Cranidos (Nv. 14)', simulaciones: 300, resultados: [], ms: 1240 }
 
@@ -129,4 +129,90 @@ test('conexión: reconectando y sondeo se reflejan mientras está en curso', () 
   ])
   expect(s.conexion).toBe('reconectando')
   expect(reducir(s, { tipo: 'conexion', conexion: 'sondeo' }).conexion).toBe('sondeo')
+})
+
+describe('predicados', () => {
+  const fases: [Fase, boolean, boolean][] = [
+    [{ tipo: 'cargando' }, false, false],
+    [{ tipo: 'pendiente', posicion: 1, estimadoSegundos: 0 }, false, true],
+    [{ tipo: 'procesando' }, false, true],
+    [{ tipo: 'completado', resultado, cache: false }, true, false],
+    [{ tipo: 'error', mensaje: 'x' }, true, false],
+    [{ tipo: 'cancelado', porUsuario: false }, true, false],
+    [{ tipo: 'noEncontrada' }, true, false],
+    [{ tipo: 'falloCarga', mensaje: 'x' }, false, false],
+  ]
+  for (const [fase, terminal, curso] of fases) {
+    test(`${fase.tipo}: terminal=${terminal}, en curso=${curso}`, () => {
+      expect(esTerminal(fase)).toBe(terminal)
+      expect(enCurso(fase)).toBe(curso)
+    })
+  }
+
+  test('faseDeEstado traduce cada estado de la API', () => {
+    expect(faseDeEstado({ id: 1, estado: 'pendiente', posicion: 2, estimadoSegundos: 9 })).toEqual({
+      tipo: 'pendiente',
+      posicion: 2,
+      estimadoSegundos: 9,
+    })
+    expect(faseDeEstado({ id: 1, estado: 'procesando' })).toEqual({ tipo: 'procesando' })
+    expect(faseDeEstado({ id: 1, estado: 'completado', resultado })).toEqual({ tipo: 'completado', resultado, cache: false })
+    expect(faseDeEstado({ id: 1, estado: 'completado', resultado, cache: true })).toMatchObject({ cache: true })
+    expect(faseDeEstado({ id: 1, estado: 'error', error: 'falló' })).toEqual({ tipo: 'error', mensaje: 'falló' })
+    expect(faseDeEstado({ id: 1, estado: 'cancelado' })).toEqual({ tipo: 'cancelado', porUsuario: false })
+  })
+})
+
+describe('creación: más casos', () => {
+  test('duplicado ya en procesando → procesando con el aviso de worker', () => {
+    const s = aplicar([{ tipo: 'creada', respuesta: { id: 1, estado: 'procesando', workerDisponible: false } }])
+    expect(s.fase).toEqual({ tipo: 'procesando' })
+    expect(s.workerDisponible).toBe(false)
+  })
+
+  test('pendiente sin posición ni estimación → posición 1 y 0 s', () => {
+    const s = aplicar([{ tipo: 'creada', respuesta: { id: 1, estado: 'pendiente', workerDisponible: true } }])
+    expect(s.fase).toEqual({ tipo: 'pendiente', posicion: 1, estimadoSegundos: 0 })
+  })
+
+  test('un estado final quita la conexión y la cancelación en curso', () => {
+    const s = aplicar([
+      pendiente(2),
+      { tipo: 'conexion', conexion: 'conectado' },
+      { tipo: 'cancelando' },
+      { tipo: 'evento', evento: { nombre: 'completado', datos: { resultado } } },
+    ])
+    expect(s.conexion).toBe('inactiva')
+    expect(s.cancelacion).toEqual({ tipo: 'no' })
+  })
+})
+
+describe('acciones sin efecto', () => {
+  test('reintentar fuera de falloCarga no cambia nada', () => {
+    const s = aplicar([pendiente(1)])
+    expect(reducir(s, { tipo: 'reintentar' })).toBe(s)
+  })
+
+  test('conexión con falloCarga se ignora', () => {
+    const s = aplicar([{ tipo: 'consultaFallida', status: 0, mensaje: 'red' }])
+    expect(reducir(s, { tipo: 'conexion', conexion: 'conectado' })).toBe(s)
+  })
+
+  test('conexión mientras carga sí se refleja', () => {
+    expect(aplicar([{ tipo: 'conexion', conexion: 'conectando' }]).conexion).toBe('conectando')
+  })
+
+  test('cancelando mientras carga no hace nada', () => {
+    expect(reducir(ESTADO_INICIAL, { tipo: 'cancelando' })).toBe(ESTADO_INICIAL)
+  })
+
+  test('404 durante el seguimiento → no encontrada', () => {
+    const s = aplicar([pendiente(1), { tipo: 'consultaFallida', status: 404, mensaje: 'x' }])
+    expect(s.fase).toEqual({ tipo: 'noEncontrada' })
+  })
+
+  test('un cancelado sin cancelación del jugador no es suyo', () => {
+    const s = aplicar([pendiente(1), { tipo: 'evento', evento: { nombre: 'cancelado', datos: {} } }])
+    expect(s.fase).toEqual({ tipo: 'cancelado', porUsuario: false })
+  })
 })

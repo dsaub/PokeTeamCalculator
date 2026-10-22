@@ -226,3 +226,103 @@ describe('reconexión y sondeo', () => {
     expect(r.cuantos).toBe(0)
   })
 })
+
+describe('casos límite', () => {
+  test('un evento sin data se lee como objeto vacío', () => {
+    seguir()
+    fuentes[0].emitir('procesando', undefined)
+    const e = new MessageEvent('procesando', { data: '' })
+    ;(fuentes[0] as unknown as { oyentes: Map<string, ((e: Event) => void)[]> }).oyentes.get('procesando')?.forEach((h) => h(e))
+    expect(acciones.at(-1)).toEqual({ tipo: 'evento', evento: { nombre: 'procesando', datos: {} } })
+  })
+
+  test('open y cortes después de detener se ignoran', () => {
+    const detener = seguir()
+    detener()
+    fuentes[0].abrir()
+    fuentes[0].cortar(true)
+    expect(tipos()).toEqual(['conexion:conectando'])
+    expect(consultas).toBe(0)
+  })
+
+  test('un error que no es de la API también se reintenta', async () => {
+    respuestas = [new Error('raro'), new ApiError(500, 'caído'), { id: 7, estado: 'error', error: 'falló' }]
+    seguir()
+    fuentes[0].cortar(true)
+    await esperar()
+    expect(r.cuantos).toBe(1)
+    await r.avanzar()
+    await esperar()
+    expect(r.cuantos).toBe(1)
+    await r.avanzar()
+    await esperar()
+    expect(consultas).toBe(3)
+    expect(acciones.at(-1)).toEqual({ tipo: 'estado', estado: { id: 7, estado: 'error', error: 'falló' } })
+    expect(r.cuantos).toBe(0)
+  })
+
+  test('una consulta que vuelve después de detener no despacha', async () => {
+    let resolver!: (e: EstadoSimulacion) => void
+    let rechazar!: (e: Error) => void
+    const despachadas: Accion[] = []
+    const fuente = new FuenteFalsa()
+    let n = 0
+    const detener = seguirSimulacion(1, (a) => despachadas.push(a), {
+      abrirEventos: () => fuente,
+      consultar: () =>
+        new Promise((res, rej) => {
+          n++
+          resolver = res
+          rechazar = rej
+        }),
+      programar: r.programar,
+      desprogramar: r.desprogramar,
+    })
+    fuente.cortar(true)
+    detener()
+    const antes = despachadas.length
+    resolver({ id: 1, estado: 'procesando' })
+    rechazar(new ApiError(404, 'x'))
+    await esperar()
+    expect(n).toBe(1)
+    expect(despachadas).toHaveLength(antes)
+    expect(r.cuantos).toBe(0)
+  })
+
+  test('sin programar/desprogramar usa setTimeout de verdad', async () => {
+    const despachadas: Accion[] = []
+    const fuente = new FuenteFalsa()
+    const estados: EstadoSimulacion[] = [{ id: 1, estado: 'procesando' }, { id: 1, estado: 'cancelado' }]
+    seguirSimulacion(
+      1,
+      (a) => despachadas.push(a),
+      { abrirEventos: () => fuente, consultar: async () => estados.shift()! },
+      { intervaloSondeoMs: 5, maxFallos: 1 },
+    )
+    fuente.cortar()
+    await new Promise((res) => setTimeout(res, 40))
+    expect(despachadas.at(-1)).toEqual({ tipo: 'estado', estado: { id: 1, estado: 'cancelado' } })
+  })
+
+  test('detener con el temporizador real lo cancela', async () => {
+    let consultasReales = 0
+    const fuente = new FuenteFalsa()
+    const detener = seguirSimulacion(
+      1,
+      () => {},
+      {
+        abrirEventos: () => fuente,
+        consultar: async () => {
+          consultasReales++
+          return { id: 1, estado: 'procesando' }
+        },
+      },
+      { intervaloSondeoMs: 5, maxFallos: 1 },
+    )
+    fuente.cortar()
+    await esperar()
+    detener()
+    await new Promise((res) => setTimeout(res, 30))
+    expect(consultasReales).toBe(1)
+  })
+})
