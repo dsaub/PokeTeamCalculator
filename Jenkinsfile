@@ -96,9 +96,11 @@ pipeline {
     stage('Preparar caché de Trivy') {
       steps {
         // Se descarga la base de datos una vez y las tres ramas la comparten.
+        // Se usa un volumen nombrado para poder borrarlo al terminar sin
+        // depender de los permisos del usuario de Jenkins sobre /tmp.
         sh '''
           docker run --rm \
-            -v /tmp/trivy-cache:/root/.cache/ \
+            -v poketeam-trivy-cache:/root/.cache/ \
             aquasec/trivy:latest image --download-db-only
         '''
       }
@@ -114,7 +116,7 @@ pipeline {
             sh(
               script: "docker run --rm " +
                 "-v /var/run/docker.sock:/var/run/docker.sock " +
-                "-v /tmp/trivy-cache:/root/.cache/ " +
+                "-v poketeam-trivy-cache:/root/.cache/ " +
                 "aquasec/trivy:latest image " +
                 "--scanners vuln " +
                 "--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL " +
@@ -153,6 +155,32 @@ pipeline {
 
   post {
     always {
+      script {
+        // Limpieza general al terminar, tanto si el build pasa como si falla.
+        // No se tocan volúmenes de datos ajenos: solo el volumen de caché de
+        // Trivy de este pipeline.
+        sh '''
+          set +e
+          echo "=== Docker antes de la limpieza ==="
+          docker system df
+
+          # Imágenes construidas por este pipeline.
+          docker image rm -f "$API_IMAGE" "$WORKER_IMAGE" "$WEB_IMAGE" 2>/dev/null
+
+          # Imágenes sin usar (incluidas base/tool antiguas) y caché de BuildKit.
+          docker image prune -a -f --filter "until=24h" 2>/dev/null || true
+          docker buildx prune -a -f 2>/dev/null || true
+
+          # Caché de Trivy de este pipeline.
+          docker volume rm -f poketeam-trivy-cache 2>/dev/null || true
+
+          # Restos de versiones anteriores que usaban /tmp/trivy-cache.
+          docker run --rm -v /tmp:/tmp alpine sh -c 'rm -rf /tmp/trivy-cache' 2>/dev/null || true
+
+          echo "=== Docker después de la limpieza ==="
+          docker system df || true
+        '''
+      }
       cleanWs()
     }
   }
