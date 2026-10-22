@@ -11,8 +11,10 @@
 # cambia al menos SECRETO_COOKIE, REDIS_PASSWORD, DB_PASSWORD y DB_ROOT_PASSWORD.
 # IMAGE_TAG fija la versión de las tres imágenes (`latest` o un commit).
 #
-# Las migraciones 001 y 002 van incrustadas abajo (copia de `migraciones/`). La
-# 003 necesita pokedata importado; después de importarlo, desde la raíz del repo:
+# Las migraciones 001 y 002 van incrustadas abajo (copia de `migraciones/`). Con
+# la base vacía, la API importa pokedata al arrancar (unos minutos, con
+# /api/salud en «importando») y aplica la 003. Si importas pokedata por otra vía,
+# reaplica la 003 desde la raíz del repo:
 #
 #   docker compose -f despliegue/docker-compose.yml run --rm \
 #     -v ./migraciones/003_v_gym_teams_formas.sql:/migraciones/003_v_gym_teams_formas.sql:ro \

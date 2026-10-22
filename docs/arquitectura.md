@@ -66,7 +66,7 @@ detalle está en [cola-redis.md](cola-redis.md).
 
 - El catálogo no expone objetos ni naturalezas; el formulario web no los ofrece.
 - `v_gym_teams` la recrea pokedata en cada importación: hay que reaplicar la
-  migración `003` después.
+  migración `003` después (la API lo hace sola cuando importa al arrancar).
 - Con varias réplicas de la API, cada una solo ve sus propios suscriptores SSE
   al buscar trabajos abandonados (`CANCELAR_SIN_CLIENTE`): podría cancelar uno
   que tiene el SSE abierto en otra réplica.

@@ -24,9 +24,10 @@ docker compose up --build
 - MariaDB: localhost:3306
 - Redis: localhost:6379 (contraseña en `REDIS_PASSWORD`)
 
-La base necesita los datos de **pokedata** para que el catálogo funcione. Las
-migraciones `001` y `002` se aplican solas; la `003` se aplica cuando pokedata
-ya está importado (ver [docs/migraciones.md](docs/migraciones.md)).
+La base necesita los datos de **pokedata** para que el catálogo funcione. Si la
+API arranca con la base vacía, los importa ella misma en segundo plano (unos
+minutos, con `/api/salud` en `importando`) y aplica la migración `003` (ver
+[docs/despliegue.md](docs/despliegue.md#datos-de-pokedata)).
 
 ## Desarrollo local
 

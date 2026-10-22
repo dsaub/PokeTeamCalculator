@@ -17,6 +17,8 @@ todos los secretos.
 | `SECRETO_COOKIE` | sí (32+ bytes) | | Firma de la cookie `sid`. |
 | `LATIDO_CADUCADO_WORKER` | no | `15s` | Un worker cuenta como disponible si su último latido es más reciente. |
 | `PROXIES_CONFIABLES` | no | vacío | IPs/CIDR que pueden enviar `X-Forwarded-For`. |
+| `POKEDATA_GEN` | no | `/pokedata-gen` | Importador de pokedata (ver abajo). Si no existe, no se importa. |
+| `POKEDATA_MIGRACION` | no | `/migraciones/003_v_gym_teams_formas.sql` | Migración que se aplica tras importar. |
 
 El resto (`SIMULACIONES`, `MAX_COLA`, `CACHE_TTL`, `LIMITE_POR_MINUTO`…) está
 documentado en [api/simulaciones.md](api/simulaciones.md).
@@ -39,6 +41,26 @@ propias variables, así que no tiene las credenciales de MariaDB.
 | `REDIS_PASSWORD` | no | `change-me-redis` | Contraseña del contenedor `redis`. Va dentro de `REDIS_URL`: sin `@`, `:`, `/` ni `?`. |
 
 El resto está en [worker.md](worker.md).
+
+## Datos de pokedata
+
+La imagen de la API incluye `pokedata-gen`, compilado desde
+[dsaub/pokedata](https://github.com/dsaub/pokedata) en el commit fijado por
+`POKEDATA_REF` en el `Dockerfile`, y la migración `003`. Si la API arranca y la
+base no tiene la vista `v_gimnasios`:
+
+1. Pone `/api/salud` en `importando` (`503`) y sigue sirviendo.
+2. En segundo plano, toma el cerrojo `GET_LOCK('poketeam_importar_pokedata')`
+   para que dos réplicas no importen a la vez.
+3. Ejecuta `pokedata-gen --mode mysql` con `DB_*`. Descarga las fuentes
+   (PokeAPI, pret, Serebii) en un directorio temporal y tarda unos minutos.
+4. Aplica `003` y pone la salud en `ok`. Si algo falla, queda en `error` y se
+   reintenta en el siguiente arranque.
+
+Solo borra y recrea las tablas y vistas de pokedata; `simulaciones` no se toca.
+El usuario `DB_USER` necesita permisos de creación sobre `DB_NAME`, como el que
+crea el contenedor de MariaDB. Para reimportar, borra la vista `v_gimnasios` y
+reinicia la API.
 
 ## Docker Compose
 
@@ -63,7 +85,8 @@ En Compose, la API confía en la red `172.16.0.0/12` para leer
 `PROXIES_CONFIABLES`.
 
 El `migrator` aplica `001` y `002` siempre. La `003` solo si detecta las vistas
-de pokedata; si importas pokedata después:
+de pokedata; con la base vacía la aplica la API al importar. Si importas
+pokedata por otra vía:
 
 ```sh
 docker compose run --rm migrator
@@ -84,8 +107,8 @@ docker compose up -d          # IMAGE_TAG=<commit> para fijar una versión
   `DB_PUERTO_HOST`); Redis no se publica. La web, en `${WEB_PORT:-80}`.
 - Las migraciones `001` y `002` van incrustadas en el compose (bloque
   `configs`): si cambian en `migraciones/`, actualízalas allí también. La `003`
-  hay que montarla al reaplicar tras importar pokedata (ver la cabecera del
-  archivo).
+  la aplica la API tras importar; solo hay que montarla si importas pokedata por
+  otra vía (ver la cabecera del archivo).
 
 ## Desarrollo sin Docker
 

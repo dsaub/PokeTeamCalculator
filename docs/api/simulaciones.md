@@ -136,7 +136,8 @@ Redis (`sim:eventos`) y el sondeo de respaldo cubre los avisos perdidos.
 { "status": "ok", "baseDatos": "ok", "cola": "ok", "workerDisponible": true }
 ```
 
-Responde `503` solo si falla MariaDB. Sin Redis (`"cola": "error"`) el catálogo
+Responde `503` solo si falla MariaDB o mientras importa pokedata
+(`"status": "importando"`, ver [../despliegue.md](../despliegue.md#datos-de-pokedata)). Sin Redis (`"cola": "error"`) el catálogo
 funciona y las simulaciones se guardan; la reconciliación las encola cuando
 Redis vuelve.
 

@@ -78,9 +78,11 @@ cd web && bun run build      # check no compila; el CI sí construye
   edites a mano: cambia `api/query.sql` y ejecuta `sqlc generate`. La tabla
   `simulaciones` no pasa por sqlc.
 - `003_v_gym_teams_formas.sql` se omite si pokedata no está importado y pokedata
-  la pisa en cada importación: reaplícala con
-  `docker compose run --rm migrator`. Con la base vacía el catálogo devuelve
-  `500`; es el comportamiento esperado.
+  la pisa en cada importación. Con la base vacía la API ejecuta
+  `/pokedata-gen` (incluido en su imagen) y aplica la `003`; si importas por
+  otra vía, reaplícala con `docker compose run --rm migrator`. Mientras
+  importa (o sin el binario, en `go run`) el catálogo devuelve `500`; es el
+  comportamiento esperado.
 
 ## Reglas locales
 

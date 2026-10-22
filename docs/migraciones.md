@@ -24,8 +24,10 @@ mariadb -u usuario -p poketeam < migraciones/003_v_gym_teams_formas.sql
 ## Docker Compose
 
 El servicio `migrator` aplica `001` y `002` y, si detecta la vista
-`v_gym_battles`, también `003`. Si la base se crea vacía, `003` se omite y debe
-reaplicarse después de importar pokedata:
+`v_gym_battles`, también `003`. Si la base se crea vacía, `003` se omite: la API
+importa pokedata al arrancar y la aplica ella misma (ver
+[despliegue.md](despliegue.md#datos-de-pokedata)). Si importas pokedata por otra
+vía, reaplícala:
 
 ```sh
 docker compose run --rm migrator
@@ -36,7 +38,7 @@ docker compose run --rm migrator
 - No editar a mano las migraciones ya aplicadas en producción; añadir una nueva
   con el siguiente número.
 - pokedata recrea sus vistas al importar: **reaplicar `003`** después de cada
-  importación.
+  importación hecha fuera de la API.
 - Solo la API usa la tabla `simulaciones`: el worker no se conecta a MariaDB.
   La cola vive en Redis (ver [cola-redis.md](cola-redis.md)); la tabla es la
   fuente de verdad desde la que la API la reconstruye.
