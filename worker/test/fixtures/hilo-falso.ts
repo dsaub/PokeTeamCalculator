@@ -2,6 +2,7 @@
 //   "colgar"  → bucle infinito (para el timeout)
 //   "romper"  → lanza un error sin capturar
 //   "fallar"  → responde con un error
+//   "salir"   → termina el hilo con process.exit
 //   otra      → espera tarea.n ms y responde con el id de este hilo como "pokemon"
 import type { MensajeHilo, MensajeTarea } from "../../src/pool";
 
@@ -13,6 +14,7 @@ self.onmessage = async (evento: MessageEvent<MensajeTarea>) => {
   const accion = tarea.candidato.species;
   if (accion === "colgar") while (true) {}
   if (accion === "romper") throw new Error("hilo roto a propósito");
+  if (accion === "salir") process.exit(0);
   if (accion === "fallar") {
     postMessage({ id, ok: false, error: "Error: fallo a propósito" } satisfies MensajeHilo);
     return;

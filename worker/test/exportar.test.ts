@@ -93,4 +93,56 @@ describe("aTextoExportacion", () => {
     errorDe(() => aTextoExportacion("Pikachu", "Rival"));
     errorDe(() => aTextoExportacion({ movimientos: ["Tackle"] }, "Rival"));
   });
+
+  test("especie vacía o desconocida", () => {
+    expect(errorDe(() => aTextoExportacion({ especie: "  ", movimientos: ["Tackle"] }, "Rival")).message).toBe("Rival: falta la especie.");
+    expect(errorDe(() => aTextoExportacion({ especie: 25, movimientos: ["Tackle"] }, "Rival")).message).toBe("Rival: falta la especie.");
+    expect(errorDe(() => aTextoExportacion({ especie: "Pikachú", movimientos: ["Tackle"] }, "Rival")).message)
+      .toBe('Rival: la especie "Pikachú" no existe.');
+  });
+
+  test("los valores largos se recortan en el mensaje", () => {
+    const largo = "x".repeat(60);
+    expect(errorDe(() => aTextoExportacion({ especie: largo, movimientos: ["Tackle"] }, "Rival")).message)
+      .toBe(`Rival: la especie "${"x".repeat(40)}…" no existe.`);
+  });
+
+  test("habilidad, objeto y naturaleza: null o vacío es «sin valor»; otro tipo, error", () => {
+    const base = { especie: "Pikachu", movimientos: ["Tackle"] };
+    expect(aTextoExportacion({ ...base, habilidad: null, objeto: "", naturaleza: "   " }, "Rival")).toBe("Pikachu\nLevel: 100\n- Tackle");
+    expect(errorDe(() => aTextoExportacion({ ...base, habilidad: 5 }, "Rival")).message).toBe('Rival: "habilidad" debe ser un texto.');
+    expect(errorDe(() => aTextoExportacion({ ...base, objeto: ["Leftovers"] }, "Rival")).message).toBe('Rival: "objeto" debe ser un texto.');
+    expect(errorDe(() => aTextoExportacion({ ...base, naturaleza: true }, "Rival")).message).toBe('Rival: "naturaleza" debe ser un texto.');
+  });
+
+  test("habilidad, objeto o naturaleza desconocidos", () => {
+    const base = { especie: "Pikachu", movimientos: ["Tackle"] };
+    expect(errorDe(() => aTextoExportacion({ ...base, habilidad: "Electricidad" }, "Rival")).message).toContain("la habilidad");
+    expect(errorDe(() => aTextoExportacion({ ...base, objeto: "Restos" }, "Rival")).message).toContain("el objeto");
+    expect(errorDe(() => aTextoExportacion({ ...base, naturaleza: "Firme" }, "Rival")).message).toContain("la naturaleza");
+  });
+
+  test("stats: null se ignora, EVs a 0 e IVs a 31 no se escriben", () => {
+    const texto = aTextoExportacion({
+      especie: "Pikachu", movimientos: ["Tackle"],
+      evs: { hp: 0, atk: null, spe: 4 },
+      ivs: { hp: 31, atk: 0, def: null },
+    }, "Rival");
+    expect(texto).toBe("Pikachu\nLevel: 100\nEVs: 4 Spe\nIVs: 0 Atk\n- Tackle");
+    expect(aTextoExportacion({ especie: "Pikachu", movimientos: ["Tackle"], evs: null, ivs: { hp: 31 } }, "Rival"))
+      .toBe("Pikachu\nLevel: 100\n- Tackle");
+  });
+
+  test("EVs que suman 510 justos sí valen", () => {
+    expect(aTextoExportacion({ especie: "Pikachu", movimientos: ["Tackle"], evs: { hp: 252, atk: 252, def: 6 } }, "Rival"))
+      .toContain("EVs: 252 HP / 252 Atk / 6 Def");
+  });
+
+  test("IVs y EVs no enteros", () => {
+    const base = { especie: "Pikachu", movimientos: ["Tackle"] };
+    expect(errorDe(() => aTextoExportacion({ ...base, ivs: { atk: 1.5 } }, "Rival")).message)
+      .toBe("Rival: los IVs de atk deben ser un número entero entre 0 y 31.");
+    expect(errorDe(() => aTextoExportacion({ ...base, evs: { atk: "4" } }, "Rival")).message)
+      .toBe("Rival: los EVs de atk deben ser un número entero entre 0 y 252.");
+  });
 });

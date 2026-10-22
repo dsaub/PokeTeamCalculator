@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
-  leerPokemon, ordenarResultados, prepararPeticion, simularCombate, simularPeticion,
+  construirResultado, leerPokemon, nombreRival, ordenarResultados, prepararPeticion, simularCandidato, simularCombate,
+  simularPeticion,
 } from "../src/sim/simular";
 import { ErrorPeticion, type Peticion, type ResultadoCandidato } from "../src/sim/tipos";
 import ejemplo from "../herramientas/ejemplo.json";
@@ -124,5 +125,108 @@ describe("simulador", () => {
       ({ pokemon, nivel: 1, victorias: 0, derrotas: 0, empates: 0, winrate, psMedioVictoria, turnosMedio });
     const orden = ordenarResultados([r("a", 0.5, 0.9, 3), r("b", 0.9, 0.1, 9), r("c", 0.5, 0.9, 2), r("d", 0.5, 1, 9)]);
     expect(orden.map((x) => x.pokemon)).toEqual(["b", "d", "c", "a"]);
+  });
+
+  test("rechaza Pokémon y movimientos no oficiales (CAP)", () => {
+    expect(mensajeDeError(() => leerPokemon("Syclant\n- Tackle", 9, "Rival"))).toBe('Rival: "Syclant" no existe.');
+    expect(mensajeDeError(() => leerPokemon("Pikachu\n- Paleo Wave", 9, "Rival"))).toBe('Rival: "Paleo Wave" no existe.');
+  });
+
+  test("texto de exportación que no es un único Pokémon", () => {
+    expect(mensajeDeError(() => leerPokemon("", 4, "Rival"))).toBe("Rival: no se pudo leer el Pokémon.");
+    expect(mensajeDeError(() => leerPokemon("Pikachu\n- Tackle\n\nEevee\n- Tackle", 4, "Rival"))).toBe("Rival: no se pudo leer el Pokémon.");
+  });
+
+  test("naturaleza u objeto inventados en el texto", () => {
+    expect(mensajeDeError(() => leerPokemon("Pikachu\nBogus Nature\n- Tackle", 4, "Rival"))).toContain("no existe");
+    expect(mensajeDeError(() => leerPokemon("Pikachu @ Varita Mágica\n- Tackle", 4, "Rival"))).toContain("no existe");
+  });
+
+  test("pone nivel 100 si no lo trae", () => {
+    expect(leerPokemon("Pikachu\n- Tackle", 4, "Rival").level).toBe(100);
+  });
+
+  test("valida las opciones", () => {
+    expect(mensajeDeError(() => prepararPeticion(peticion({ opciones: [] as never })))).toBe("Las opciones no tienen el formato correcto.");
+    for (const aleatoriedadRival of [-0.1, Number.NaN, "0.5"]) {
+      expect(mensajeDeError(() => prepararPeticion(peticion({ opciones: { aleatoriedadRival: aleatoriedadRival as number } }))))
+        .toBe("La aleatoriedad del rival debe estar entre 0 y 1.");
+    }
+    for (const maxTurnos of [0, 1001, 1.5, "10"]) {
+      expect(mensajeDeError(() => prepararPeticion(peticion({ opciones: { maxTurnos: maxTurnos as number } }))))
+        .toBe("El máximo de turnos debe ser un entero entre 1 y 1000.");
+    }
+  });
+
+  test("opciones null o con valores null usan los valores por defecto", () => {
+    expect(prepararPeticion(peticion({ opciones: null as never })).opciones).toEqual({ aleatoriedadRival: 0.2, maxTurnos: 100 });
+    expect(prepararPeticion(peticion({ opciones: { aleatoriedadRival: null as never, maxTurnos: null as never } })).opciones)
+      .toEqual({ aleatoriedadRival: 0.2, maxTurnos: 100 });
+    expect(prepararPeticion(peticion({ opciones: { aleatoriedadRival: 0, maxTurnos: 1000 } })).opciones)
+      .toEqual({ aleatoriedadRival: 0, maxTurnos: 1000 });
+  });
+
+  test("simulaciones, candidatos y rival con formato incorrecto", () => {
+    for (const simulaciones of [1.5, "10", Number.NaN]) {
+      expect(mensajeDeError(() => prepararPeticion(peticion({ simulaciones: simulaciones as number })))).toContain("simulaciones");
+    }
+    const siete = Array.from({ length: 7 }, () => ({ especie: "Pikachu", movimientos: ["Tackle"] }));
+    expect(mensajeDeError(() => prepararPeticion(peticion({ candidatos: siete })))).toBe("Debes indicar entre 1 y 6 Pokémon de tu equipo.");
+    expect(mensajeDeError(() => prepararPeticion(peticion({ candidatos: "Pikachu" as never })))).toContain("entre 1 y 6");
+    expect(mensajeDeError(() => prepararPeticion(peticion({ rival: undefined as never })))).toBe("Rival: falta el Pokémon o no tiene el formato correcto.");
+    expect(mensajeDeError(() => prepararPeticion(peticion({ gen: 4 as never })))).toContain("gen1");
+  });
+
+  test("el error de un candidato dice cuál es", () => {
+    const candidatos = [{ especie: "Pikachu", movimientos: ["Tackle"] }, { especie: "Pikachu", movimientos: ["Nada"] }];
+    expect(mensajeDeError(() => prepararPeticion(peticion({ candidatos })))).toStartWith("Candidato 2:");
+  });
+
+  test("el rival puede ganar", () => {
+    const p = prepararPeticion({
+      gen: "gen4", simulaciones: 1,
+      rival: { especie: "Garchomp", nivel: 100, movimientos: ["Earthquake"] },
+      candidatos: [{ especie: "Magikarp", nivel: 5, movimientos: ["Splash"] }],
+    });
+    const r = simularCombate(p.gen, p.candidatos[0]!, p.rival, p.opciones);
+    expect(r.ganador).toBe("rival");
+    expect(r.psJugador).toBe(0);
+  });
+
+  test("simularCandidato sin victorias: PS medios 0", () => {
+    const p = prepararPeticion({
+      gen: "gen4", simulaciones: 3,
+      rival: { especie: "Garchomp", nivel: 100, movimientos: ["Earthquake"] },
+      candidatos: [{ especie: "Magikarp", nivel: 5, movimientos: ["Splash"] }],
+    });
+    expect(simularCandidato(p.gen, p.candidatos[0]!, p.rival, p.n, p.opciones)).toEqual({
+      pokemon: "Magikarp", nivel: 5, victorias: 0, derrotas: 3, empates: 0, winrate: 0, psMedioVictoria: 0, turnosMedio: 1,
+    });
+  });
+
+  test("nombreRival y construirResultado", () => {
+    const p = prepararPeticion({
+      gen: "gen4", simulaciones: 7,
+      rival: { especie: "Cranidos", nivel: 14, movimientos: ["Headbutt"] },
+      candidatos: [{ especie: "Monferno", movimientos: ["Ember"] }],
+    });
+    expect(nombreRival(p.rival)).toBe("Cranidos (Nv. 14)");
+    const r = (pokemon: string, winrate: number): ResultadoCandidato =>
+      ({ pokemon, nivel: 1, victorias: 0, derrotas: 0, empates: 0, winrate, psMedioVictoria: 0, turnosMedio: 1 });
+    expect(construirResultado(p, [r("a", 0.1), r("b", 0.9)], 12.6)).toEqual({
+      gen: "gen4", rival: "Cranidos (Nv. 14)", simulaciones: 7, resultados: [r("b", 0.9), r("a", 0.1)], ms: 13,
+    });
+  });
+
+  test("ordenarResultados no modifica la lista original", () => {
+    const r = (pokemon: string, winrate: number): ResultadoCandidato =>
+      ({ pokemon, nivel: 1, victorias: 0, derrotas: 0, empates: 0, winrate, psMedioVictoria: 0, turnosMedio: 1 });
+    const lista = [r("a", 0.1), r("b", 0.9)];
+    ordenarResultados(lista);
+    expect(lista.map((x) => x.pokemon)).toEqual(["a", "b"]);
+  });
+
+  test("ErrorPeticion tiene su nombre", () => {
+    expect(new ErrorPeticion("x").name).toBe("ErrorPeticion");
   });
 });

@@ -104,4 +104,52 @@ describe("pool", () => {
     await Promise.all(promesas);
     expect(await rechazo(pool.ejecutar(tareaFalsa("dormir")))).toBeInstanceOf(ErrorPoolCerrado);
   });
+
+  test("necesita un número entero de hilos, al menos uno", () => {
+    for (const hilos of [0, -1, 1.5, Number.NaN]) {
+      expect(() => new Pool({ hilos, timeoutMs: 100, script: SCRIPT_FALSO })).toThrow("El pool necesita al menos un hilo.");
+    }
+  });
+
+  test("cerrar() sin tareas termina enseguida y rechaza las nuevas", async () => {
+    const pool = new Pool({ hilos: 2, timeoutMs: 1000, script: SCRIPT_FALSO });
+    expect(pool.total).toBe(2);
+    expect(pool.ocupados).toBe(0);
+    expect(pool.enCola).toBe(0);
+    await pool.cerrar();
+    expect(await rechazo(pool.ejecutar(tareaFalsa("ok")))).toBeInstanceOf(ErrorPoolCerrado);
+  });
+
+  test("un hilo que termina solo se sustituye y lo registra", async () => {
+    const eventos: Record<string, unknown>[] = [];
+    const pool = new Pool({ hilos: 1, timeoutMs: 5000, script: SCRIPT_FALSO, registrar: (evento, datos) => eventos.push({ evento, ...datos }) });
+    try {
+      const e = await rechazo(pool.ejecutar(tareaFalsa("salir")));
+      expect(e).toBeInstanceOf(ErrorHilo);
+      expect(e.message).toBe("El hilo terminó inesperadamente.");
+      expect(eventos).toEqual([{ evento: "hilo_reemplazado", motivo: "El hilo terminó inesperadamente.", tarea: 1 }]);
+      expect(pool.total).toBe(1);
+      expect((await pool.ejecutar(tareaFalsa("ok"))).victorias).toBe(0);
+    } finally {
+      await pool.cerrar();
+    }
+  });
+
+  test("un error dentro de la simulación real rechaza con ErrorHilo", async () => {
+    const pool = new Pool({ hilos: 1, timeoutMs: 30_000 });
+    try {
+      const p = prepararPeticion({
+        gen: "gen4", simulaciones: 1,
+        rival: { especie: "Cranidos", nivel: 14, movimientos: ["Headbutt"] },
+        candidatos: [{ especie: "Monferno", nivel: 16, movimientos: ["Mach Punch"] }],
+      });
+      // Un set sin especie rompe a Showdown dentro del hilo.
+      const roto = { ...p.candidatos[0]!, species: "" };
+      const e = await rechazo(pool.ejecutar({ gen: p.gen, candidato: roto, rival: p.rival, n: 1, opciones: p.opciones }));
+      expect(e).toBeInstanceOf(ErrorHilo);
+      expect(e.message).toStartWith("Error inesperado en el hilo: ");
+    } finally {
+      await pool.cerrar();
+    }
+  }, 30_000);
 });

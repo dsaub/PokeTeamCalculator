@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Battle, toID } from "pokemon-showdown";
-import { danoEsperado } from "../src/sim/ia";
+import { danoEsperado, elegirMejorMovimiento, elegirMovimientoLider } from "../src/sim/ia";
 import { leerPokemon } from "../src/sim/simular";
 
 /** Combate recién empezado, ya en la petición de movimiento. */
@@ -155,5 +155,177 @@ describe("danoEsperado con los modificadores del daño final (ModifyDamage)", ()
     const con = danoEntre("Haxorus\nAbility: Mold Breaker\nLevel: 50\n- Dragon Claw", "Dragonite\nAbility: Multiscale\nLevel: 50\n- Outrage");
     const sin = danoEntre("Haxorus\nAbility: Mold Breaker\nLevel: 50\n- Dragon Claw", "Dragonite\nAbility: Inner Focus\nLevel: 50\n- Outrage");
     expect(con / sin).toBeCloseTo(1, 5);
+  });
+});
+
+describe("danoEsperado: casos especiales", () => {
+  /** Daño del primer movimiento de `jugador` a `rival`. */
+  function primero(jugador: string, rival: string, gen = 9): number {
+    const battle = combate(gen, jugador, rival);
+    return dano(battle, battle.p1.active[0]!.moveSlots[0]!.id);
+  }
+
+  test("los movimientos de estado no hacen daño", () => {
+    expect(primero("Tauros\nLevel: 50\n- Growl", RIVAL)).toBe(0);
+  });
+
+  test("inmunidad por tipo: Normal contra Fantasma, Tierra contra Volador", () => {
+    expect(primero("Tauros\nLevel: 50\n- Body Slam", "Gengar\nLevel: 50\n- Lick")).toBe(0);
+    expect(primero("Garchomp\nLevel: 50\n- Earthquake", "Pidgeot\nLevel: 50\n- Gust")).toBe(0);
+  });
+
+  test("inmunidad por habilidad: Levitate y Flash Fire", () => {
+    expect(primero("Garchomp\nLevel: 50\n- Earthquake", "Bronzong\nAbility: Levitate\nLevel: 50\n- Confusion")).toBe(0);
+    expect(primero("Charizard\nLevel: 50\n- Flamethrower", "Heatran\nAbility: Flash Fire\nLevel: 50\n- Lava Plume")).toBe(0);
+    expect(primero("Charizard\nLevel: 50\n- Flamethrower", "Heatran\nAbility: Flame Body\nLevel: 50\n- Lava Plume")).toBeGreaterThan(0);
+  });
+
+  test("Mold Breaker ignora la inmunidad por habilidad", () => {
+    expect(primero("Excadrill\nAbility: Mold Breaker\nLevel: 50\n- Earthquake", "Bronzong\nAbility: Levitate\nLevel: 50\n- Confusion")).toBeGreaterThan(0);
+  });
+
+  test("Wonder Guard solo deja pasar los súper eficaces", () => {
+    const shedinja = "Shedinja\nAbility: Wonder Guard\nLevel: 50\n- Scratch";
+    expect(primero("Scizor\nLevel: 50\n- X-Scissor", shedinja)).toBe(0);
+    expect(primero("Charizard\nLevel: 50\n- Flamethrower", shedinja)).toBeGreaterThan(0);
+  });
+
+  test("Lightning Rod y Storm Drain dan inmunidad solo desde gen 5", () => {
+    const pararrayos = "Manectric\nAbility: Lightning Rod\nLevel: 50\n- Spark";
+    const colector = "Gastrodon\nAbility: Storm Drain\nLevel: 50\n- Mud Bomb";
+    expect(primero("Jolteon\nLevel: 50\n- Thunderbolt", pararrayos, 4)).toBeGreaterThan(0);
+    expect(primero("Jolteon\nLevel: 50\n- Thunderbolt", pararrayos, 5)).toBe(0);
+    expect(primero("Blastoise\nLevel: 50\n- Surf", colector, 4)).toBeGreaterThan(0);
+    expect(primero("Blastoise\nLevel: 50\n- Surf", colector, 5)).toBe(0);
+  });
+
+  test("Struggle golpea incluso a los Fantasma", () => {
+    expect(primero("Tauros\nLevel: 50\n- Struggle", "Gengar\nLevel: 50\n- Lick")).toBeGreaterThan(0);
+  });
+
+  test("OHKO: los PS del rival por la precisión, o 0 si es de más nivel", () => {
+    const battle = combate(4, "Rhydon\nLevel: 50\n- Horn Drill", "Snorlax\nLevel: 40\n- Rest");
+    expect(dano(battle, "Horn Drill")).toBeCloseTo(battle.p2.active[0]!.hp * 0.3, 5);
+    expect(primero("Rhydon\nLevel: 50\n- Horn Drill", "Snorlax\nLevel: 60\n- Rest", 4)).toBe(0);
+  });
+
+  test("Super Fang quita la mitad de los PS actuales", () => {
+    const battle = combate(9, "Raticate\nLevel: 50\n- Super Fang", RIVAL);
+    const hp = battle.p2.active[0]!.hp;
+    expect(dano(battle, "Super Fang")).toBeCloseTo(Math.floor(hp / 2) * 0.9, 5);
+    battle.p2.active[0]!.hp = 1;
+    expect(dano(battle, "Super Fang")).toBeCloseTo(0.9, 5);
+  });
+
+  test("daño fijo y por nivel", () => {
+    expect(primero("Machamp\nLevel: 37\n- Seismic Toss", RIVAL)).toBe(37);
+    expect(primero("Dratini\nLevel: 20\n- Dragon Rage", RIVAL, 4)).toBe(40);
+  });
+
+  test("potencia variable (Low Kick) se toma como 60", () => {
+    const lowKick = primero("Machamp\nLevel: 50\n- Low Kick", RIVAL);
+    const brickBreak = primero("Machamp\nLevel: 50\n- Brick Break", RIVAL);
+    expect(lowKick / brickBreak).toBeWithin(0.75, 0.85);
+  });
+
+  test("golpes múltiples: 2–5 cuenta 3,1 y Double Kick, 2", () => {
+    const bulletSeed = primero("Breloom\nAbility: Poison Heal\nLevel: 50\n- Bullet Seed", RIVAL);
+    const seedBomb = primero("Breloom\nAbility: Poison Heal\nLevel: 50\n- Seed Bomb", RIVAL);
+    expect(bulletSeed / seedBomb).toBeWithin(0.85, 1.05);
+    const doubleKick = primero("Hitmonlee\nAbility: Limber\nLevel: 50\n- Double Kick", RIVAL);
+    const karateChop = primero("Hitmonlee\nAbility: Limber\nLevel: 50\n- Karate Chop", RIVAL);
+    expect(doubleKick / karateChop).toBeWithin(1.05, 1.35);
+  });
+
+  test("Adaptability: STAB ×2 en vez de ×1,5", () => {
+    const con = primero("Eevee\nAbility: Adaptability\nLevel: 50\n- Body Slam", RIVAL);
+    const sin = primero("Eevee\nAbility: Run Away\nLevel: 50\n- Body Slam", RIVAL);
+    expect(con / sin).toBeWithin(1.25, 1.42);
+  });
+
+  test("la quemadura no afecta a los movimientos especiales", () => {
+    const battle = combate(9, "Charizard\nLevel: 50\n- Flamethrower", RIVAL);
+    const sano = dano(battle, "Flamethrower");
+    battle.p1.active[0]!.setStatus("brn");
+    expect(dano(battle, "Flamethrower")).toBeCloseTo(sano, 5);
+  });
+});
+
+describe("elegir movimiento", () => {
+  let azar: ReturnType<typeof spyOn<Math, "random">> | undefined;
+  afterEach(() => {
+    azar?.mockRestore();
+    azar = undefined;
+  });
+
+  const movimientosDe = (battle: Battle) =>
+    (battle.p1.activeRequest as { active: { moves: { pp: number; disabled?: boolean }[] }[] }).active[0]!.moves;
+
+  test("elige el que más daño hace", () => {
+    const battle = combate(9, "Tauros\nLevel: 50\n- Tackle\n- Body Slam\n- Growl", RIVAL);
+    expect(elegirMejorMovimiento(battle, "p1")).toBe("move 2");
+  });
+
+  test("sin movimientos usables → default", () => {
+    const battle = combate(9, "Tauros\nLevel: 50\n- Tackle\n- Body Slam", RIVAL);
+    for (const m of movimientosDe(battle)) m.pp = 0;
+    expect(elegirMejorMovimiento(battle, "p1")).toBe("default");
+  });
+
+  test("descarta los deshabilitados y los que no tienen PP", () => {
+    const battle = combate(9, "Tauros\nLevel: 50\n- Body Slam\n- Double-Edge\n- Tackle", RIVAL);
+    const movs = movimientosDe(battle);
+    movs[1]!.disabled = true;
+    movs[0]!.pp = 0;
+    expect(elegirMejorMovimiento(battle, "p1")).toBe("move 3");
+  });
+
+  test("si varios debilitan, prefiere la prioridad", () => {
+    const battle = combate(9, "Machamp\nLevel: 100\n- Close Combat\n- Mach Punch", "Magikarp\nLevel: 5\n- Splash");
+    expect(elegirMejorMovimiento(battle, "p1")).toBe("move 2");
+  });
+
+  test("si varios debilitan con la misma prioridad, prefiere el más preciso", () => {
+    const battle = combate(9, "Machamp\nLevel: 100\n- Focus Blast\n- Close Combat", "Magikarp\nLevel: 5\n- Splash");
+    expect(elegirMejorMovimiento(battle, "p1")).toBe("move 2");
+  });
+
+  test("entre empatados elige al azar", () => {
+    const battle = combate(9, "Tauros\nLevel: 50\n- Growl\n- Leer\n- Tail Whip", RIVAL);
+    azar = spyOn(Math, "random").mockReturnValue(0);
+    expect(elegirMejorMovimiento(battle, "p1")).toBe("move 1");
+    azar.mockReturnValue(0.99);
+    expect(elegirMejorMovimiento(battle, "p1")).toBe("move 3");
+  });
+
+  test("el líder con aleatoriedad 1 usa uno al azar aunque sea malo", () => {
+    const battle = combate(9, "Tauros\nLevel: 50\n- Growl\n- Body Slam", RIVAL);
+    azar = spyOn(Math, "random").mockReturnValue(0);
+    expect(elegirMovimientoLider(battle, "p1", 1)).toBe("move 1");
+  });
+
+  test("el líder con aleatoriedad 0 usa el mejor", () => {
+    const battle = combate(9, "Tauros\nLevel: 50\n- Growl\n- Body Slam", RIVAL);
+    azar = spyOn(Math, "random").mockReturnValue(0);
+    expect(elegirMovimientoLider(battle, "p1", 0)).toBe("move 2");
+  });
+
+  test("el líder al azar sin movimientos usables → default", () => {
+    const battle = combate(9, "Tauros\nLevel: 50\n- Growl", RIVAL);
+    for (const m of movimientosDe(battle)) m.pp = 0;
+    azar = spyOn(Math, "random").mockReturnValue(0);
+    expect(elegirMovimientoLider(battle, "p1", 1)).toBe("default");
+  });
+});
+
+describe("parches de Showdown fuera de la estimación", () => {
+  test("eatItem y add funcionan con normalidad", () => {
+    const battle = combate(4, "Monferno @ Oran Berry\nLevel: 16\n- Ember", "Cranidos\nLevel: 14\n- Headbutt");
+    const monferno = battle.p1.active[0]!;
+    const lineas = battle.log.length;
+    expect(monferno.eatItem(true)).toBeTruthy();
+    expect(monferno.item).toBe("");
+    battle.add("message", "hola");
+    expect(battle.log.length).toBeGreaterThan(lineas);
   });
 });
