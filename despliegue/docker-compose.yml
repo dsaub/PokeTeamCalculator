@@ -1,0 +1,183 @@
+# Despliegue con las imágenes publicadas en GHCR (sin build ni repositorio).
+# Basta con copiar este archivo a cualquier máquina con Docker Compose 2.24+:
+#
+#   docker compose up -d
+#
+# Las imágenes de GHCR son privadas: antes, `docker login ghcr.io` con un PAT
+# que tenga `read:packages`.
+#
+# Funciona sin `.env`, con valores de prueba. Para algo más que probar, crea un
+# `.env` junto a este archivo (ver `.env.example` en la raíz del repositorio) y
+# cambia al menos SECRETO_COOKIE, REDIS_PASSWORD, DB_PASSWORD y DB_ROOT_PASSWORD.
+# IMAGE_TAG fija la versión de las tres imágenes (`latest` o un commit).
+#
+# Las migraciones 001 y 002 van incrustadas abajo (copia de `migraciones/`). La
+# 003 necesita pokedata importado; después de importarlo, desde la raíz del repo:
+#
+#   docker compose -f despliegue/docker-compose.yml run --rm \
+#     -v ./migraciones/003_v_gym_teams_formas.sql:/migraciones/003_v_gym_teams_formas.sql:ro \
+#     migrator
+
+name: poketeam
+
+x-db-env: &db-env
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_NAME: ${DB_NAME:-pokedata}
+  DB_USER: ${DB_USER:-pokedata}
+  DB_PASSWORD: ${DB_PASSWORD:-change-me}
+
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${DB_NAME:-pokedata}
+      MARIADB_USER: ${DB_USER:-pokedata}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-change-me}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-change-me-root}
+    ports:
+      - "127.0.0.1:${DB_PUERTO_HOST:-3306}:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Cola entre la API y el worker. Con AOF sobrevive a un reinicio; si aun así
+  # pierde los datos, la API vuelve a encolar desde MariaDB.
+  redis:
+    image: redis:8.10-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrator:
+    image: mariadb:11.4
+    environment:
+      <<: *db-env
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-change-me-root}
+    configs:
+      - source: aplicar
+        target: /migraciones/aplicar.sh
+      - source: m001
+        target: /migraciones/001_simulaciones.sql
+      - source: m002
+        target: /migraciones/002_indices_simulaciones.sql
+    command: ["sh", "/migraciones/aplicar.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ghcr.io/dsaub/poketeamcalculator:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *db-env
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change-me-redis}@redis:6379/0
+      SECRETO_COOKIE: ${SECRETO_COOKIE:-cambia-esto-por-un-secreto-de-al-menos-32-bytes}
+      GIN_MODE: release
+      # Confía en la red de Docker para leer X-Forwarded-For de nginx.
+      PROXIES_CONFIABLES: ${PROXIES_CONFIABLES:-172.16.0.0/12}
+    ports:
+      - "127.0.0.1:${API_PUERTO_HOST:-8080}:8080"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: ghcr.io/dsaub/poketeamcalculator-worker:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # El worker solo habla con Redis y no sirve HTTP. Sin env_file: así no
+    # recibe las credenciales de MariaDB ni los secretos de la API.
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change-me-redis}@redis:6379/0
+      HILOS: ${HILOS:-}
+      TRABAJOS_SIMULTANEOS: ${TRABAJOS_SIMULTANEOS:-2}
+      INTERVALO_LATIDO_MS: ${INTERVALO_LATIDO_MS:-5000}
+      LATIDO_CADUCADO_MS: ${LATIDO_CADUCADO_MS:-60000}
+      MAX_INTENTOS: ${MAX_INTENTOS:-3}
+      TIMEOUT_TAREA_MS: ${TIMEOUT_TAREA_MS:-60000}
+      ESPERA_APAGADO_MS: ${ESPERA_APAGADO_MS:-30000}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  web:
+    image: ghcr.io/dsaub/poketeamcalculator-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_started
+
+configs:
+  # Igual que migraciones/aplicar.sh, pero la 003 es opcional: solo se aplica si
+  # el archivo está montado y pokedata ya está importado.
+  aplicar:
+    content: |
+      set -eu
+      sql() {
+        mariadb --protocol=tcp -h "$$DB_HOST" -P "$$DB_PORT" -u root -p"$$DB_ROOT_PASSWORD" "$$DB_NAME" "$$@"
+      }
+      for archivo in /migraciones/001_simulaciones.sql /migraciones/002_indices_simulaciones.sql; do
+        echo "Aplicando $$(basename "$$archivo")…"
+        sql < "$$archivo"
+      done
+      m003=/migraciones/003_v_gym_teams_formas.sql
+      if ! sql -N -e "SELECT COUNT(*) FROM information_schema.views WHERE table_schema = DATABASE() AND table_name = 'v_gym_battles'" | grep -qx '1'; then
+        echo "pokedata todavía no está importado: se omite 003."
+      elif [ -f "$$m003" ]; then
+        echo "pokedata detectado: aplicando 003_v_gym_teams_formas.sql…"
+        sql < "$$m003"
+      else
+        echo "pokedata detectado, pero 003 no está montada: aplícala desde el repositorio." >&2
+      fi
+      echo "Migraciones terminadas."
+
+  # Copias de migraciones/001 y 002 (idempotentes). Si cambian allí o se añade
+  # otra que no dependa de pokedata, actualiza también este bloque.
+  m001:
+    content: |
+      CREATE TABLE IF NOT EXISTS simulaciones (
+        id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        hash       CHAR(64) NOT NULL,
+        usuario    VARCHAR(64) NOT NULL,
+        peticion   JSON NOT NULL,
+        estado     ENUM('pendiente','procesando','completado','error','cancelado') NOT NULL DEFAULT 'pendiente',
+        resultado  JSON NULL,
+        error      TEXT NULL,
+        intentos   INT NOT NULL DEFAULT 0,
+        worker     VARCHAR(64) NULL,
+        creado     DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+        iniciado   DATETIME(3) NULL,
+        latido     DATETIME(3) NULL,
+        terminado  DATETIME(3) NULL,
+        INDEX idx_cola (estado, creado),
+        INDEX idx_hash (hash)
+      ) ENGINE=InnoDB;
+  m002:
+    content: |
+      CREATE INDEX IF NOT EXISTS idx_usuario_estado ON simulaciones (usuario, estado);
+      CREATE INDEX IF NOT EXISTS idx_hash_estado ON simulaciones (hash, estado, terminado);
+
+volumes:
+  db_data:
+  redis_data:

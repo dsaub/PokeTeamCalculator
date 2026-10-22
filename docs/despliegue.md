@@ -69,6 +69,24 @@ de pokedata; si importas pokedata después:
 docker compose run --rm migrator
 ```
 
+### Con las imágenes publicadas
+
+`despliegue/docker-compose.yml` levanta lo mismo con las imágenes de GHCR que
+publica el `Jenkinsfile`, sin build ni repositorio: basta con copiar ese archivo.
+Funciona sin `.env` (valores de prueba); si hay uno a su lado, lo usa.
+
+```sh
+docker login ghcr.io          # las imágenes son privadas: PAT con read:packages
+docker compose up -d          # IMAGE_TAG=<commit> para fijar una versión
+```
+
+- API y MariaDB solo se publican en `127.0.0.1` (`API_PUERTO_HOST`,
+  `DB_PUERTO_HOST`); Redis no se publica. La web, en `${WEB_PORT:-80}`.
+- Las migraciones `001` y `002` van incrustadas en el compose (bloque
+  `configs`): si cambian en `migraciones/`, actualízalas allí también. La `003`
+  hay que montarla al reaplicar tras importar pokedata (ver la cabecera del
+  archivo).
+
 ## Desarrollo sin Docker
 
 1. MariaDB 10.6+ con la base y el usuario de `.env`, y Redis 6.2+ (o
