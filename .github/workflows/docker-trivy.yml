@@ -16,6 +16,18 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    # Los tests de la cola del worker necesitan un Redis de verdad; los de Go
+    # usan miniredis.
+    services:
+      redis:
+        image: redis:8.10-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +49,8 @@ jobs:
 
       - name: Worker install, test and typecheck
         working-directory: worker
+        env:
+          REDIS_URL_TEST: redis://127.0.0.1:6379
         run: |
           bun install --frozen-lockfile
           bun test

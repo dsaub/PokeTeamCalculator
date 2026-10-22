@@ -17,6 +17,24 @@ services:
       timeout: 5s
       retries: 20
 
+  # Cola entre la API y el worker. Con AOF sobrevive a un reinicio; si aun así
+  # pierde los datos, la API vuelve a encolar desde MariaDB.
+  redis:
+    image: redis:8.10-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-redis}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   migrator:
     image: mariadb:11.4
     env_file: .env
@@ -39,8 +57,7 @@ services:
     env_file: .env
     environment:
       DB_HOST: db
-      URL_WORKER: http://worker:7070
-      HOST_INTERNO: 0.0.0.0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change-me-redis}@redis:6379/0
       GIN_MODE: release
       # Confía en la red de Docker para leer X-Forwarded-For de nginx.
       PROXIES_CONFIABLES: ${PROXIES_CONFIABLES:-172.16.0.0/12}
@@ -49,23 +66,28 @@ services:
     depends_on:
       migrator:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
   worker:
     build:
       context: ./worker
       dockerfile: Dockerfile
     restart: unless-stopped
-    env_file: .env
+    # El worker solo habla con Redis y no sirve HTTP. Sin env_file: así no
+    # recibe las credenciales de MariaDB ni los secretos de la API.
     environment:
-      DATABASE_URL: mysql://${DB_USER:-pokedata}:${DB_PASSWORD:-change-me}@db:3306/${DB_NAME:-pokedata}
-      URL_CALLBACK: http://api:8081
-      HOST_WORKER: 0.0.0.0
-      PUERTO: "7070"
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change-me-redis}@redis:6379/0
+      HILOS: ${HILOS:-}
+      TRABAJOS_SIMULTANEOS: ${TRABAJOS_SIMULTANEOS:-2}
+      INTERVALO_LATIDO_MS: ${INTERVALO_LATIDO_MS:-5000}
+      LATIDO_CADUCADO_MS: ${LATIDO_CADUCADO_MS:-60000}
+      MAX_INTENTOS: ${MAX_INTENTOS:-3}
+      TIMEOUT_TAREA_MS: ${TIMEOUT_TAREA_MS:-60000}
+      ESPERA_APAGADO_MS: ${ESPERA_APAGADO_MS:-30000}
     depends_on:
-      db:
+      redis:
         condition: service_healthy
-      api:
-        condition: service_started
 
   web:
     build:
@@ -80,3 +102,4 @@ services:
 
 volumes:
   db_data:
+  redis_data:
