@@ -86,6 +86,10 @@ el público y no tiene la ruta `/interno`.
   si encuentra cualquier vulnerabilidad con corrección disponible en una
   versión posterior (todas las severidades); las que aún no tienen parche se
   ignoran con `--ignore-unfixed`.
+- El `post { always }` del `Jenkinsfile` limpia al terminar: elimina las tres
+  imágenes construidas, purga imágenes sin usar de más de 24 h, borra la caché
+  de BuildKit y el volumen de caché de Trivy, y ejecuta `cleanWs()`. No toca
+  volúmenes de datos ajenos.
 
 ## Notas de seguridad
 

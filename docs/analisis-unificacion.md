@@ -88,6 +88,8 @@
    build y del escaneo Trivy. En Jenkins, SonarQube, Hadolint y Trivy se
    ejecutan en paralelo para los tres componentes. Trivy falla si hay alguna
    vulnerabilidad con corrección disponible (`--ignore-unfixed` + `--exit-code 1`).
+   El `post` limpia imágenes construidas, imágenes sin usar de más de 24 h,
+   caché de BuildKit, volumen de Trivy y workspace.
 6. **`.env.example` incompleto**: no tenía `DATABASE_URL`, `URL_CALLBACK` ni las
    variables del worker. Ahora cubre los tres componentes.
 7. **Callback mal documentado**: el worker apuntaba a `8080` (público) en vez de
