@@ -115,7 +115,11 @@ pendientes de MariaDB en orden de creación) y después el worker nuevo.
   registro. **Falla el pipeline** si encuentra cualquier vulnerabilidad con
   corrección disponible (todas las severidades); las que aún no tienen parche se
   ignoran con `--ignore-unfixed`. Como el push va antes, una imagen vulnerable
-  ya está en GHCR cuando el pipeline falla.
+  ya está en GHCR cuando el pipeline falla. Las tres ramas comparten la base de
+  datos (Trivy la abre en solo lectura), pero cada una usa
+  `--cache-backend memory`: la caché de escaneo en disco se bloquea en
+  exclusiva y dos Trivy a la vez fallan con `cache may be in use by another
+  process`.
 - El `post { always }` borra **siempre** el sandbox de Daytona, falle o no el
   build. Cada agente limpia lo suyo: `buildMultiArchImage` ejecuta
   `cleanDocker()`, y la stage de Trivy borra su volumen de caché y hace
