@@ -104,6 +104,13 @@ pendientes de MariaDB en orden de creación) y después el worker nuevo.
   `--cpu/--memory/--disk` al crear desde un snapshot). Las imágenes amd64 se
   compilan de una en una; conviene al menos 4 CPU y 8 GB (el disco tiene un máximo de 10 GB por sandbox):
   `daytona snapshot create mlib-dind --image docker:28.3.3-dind --cpu 4 --memory 8 --disk 10`.
+- El cortafuegos de salida del sandbox (lista blanca de Daytona) bloquea todos
+  los mirrors de Alpine (`dl-cdn.alpinelinux.org` y demás): un `apk` dentro de
+  un build falla con `TLS: unspecified error`. Sí deja pasar `deb.debian.org`,
+  `archive.ubuntu.com`, npm, GitHub y `proxy.golang.org`. Por eso las imágenes
+  del worker (`oven/bun:*-slim`) y de la web (`nginx:*`) son Debian y se
+  parchean con `apt-get upgrade`. Una imagen Alpine solo vale si no instala
+  nada (como el builder de la API).
 - Trivy escanea después las imágenes publicadas, en paralelo y leyéndolas del
   registro. **Falla el pipeline** si encuentra cualquier vulnerabilidad con
   corrección disponible (todas las severidades); las que aún no tienen parche se

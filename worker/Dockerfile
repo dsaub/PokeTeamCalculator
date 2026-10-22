@@ -1,7 +1,11 @@
-FROM oven/bun:1.4.3-alpine
+# Debian y no Alpine: la imagen amd64 se construye en un sandbox de Daytona cuyo
+# cortafuegos bloquea los mirrors de Alpine pero deja pasar deb.debian.org.
+FROM oven/bun:1.4.3-slim
 
-# Parches de seguridad de Alpine (musl, zlib) que aún no trae la imagen base.
-RUN apk upgrade --no-cache
+# Parches de seguridad que aún no trae la imagen base.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
