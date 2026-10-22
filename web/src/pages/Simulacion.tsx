@@ -5,13 +5,15 @@ import { abrirEventos, cancelarSimulacion, consultarSimulacion } from '../api/si
 import { cargarContexto, type ContextoSimulacion } from '../dominio/almacen.ts'
 import { ESTADO_INICIAL, enCurso, faseDeEstado, reducir } from '../dominio/maquina.ts'
 import { seguirSimulacion } from '../dominio/seguimiento.ts'
-import { decimal, explicacionEmpate, fraseRecomendacion, porcentaje, textoPosicion, tiempoEstimado } from '../dominio/textos.ts'
-
-function mensajeDeError(e: unknown): string {
-  if (e instanceof ApiError) return e.message
-  if (e instanceof Error) return e.message
-  return 'Ha ocurrido un error inesperado.'
-}
+import {
+  decimal,
+  explicacionEmpate,
+  fraseRecomendacion,
+  mensajeDeError,
+  porcentaje,
+  textoPosicion,
+  tiempoEstimado,
+} from '../dominio/textos.ts'
 
 const ETIQUETA_CONEXION: Record<string, string> = {
   conectando: 'Conectando…',

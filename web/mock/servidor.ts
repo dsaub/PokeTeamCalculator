@@ -197,7 +197,8 @@ function api(req: IncomingMessage, res: ServerResponse): void {
       }
       t.estado = 'cancelado'
       for (const timer of esperas.get(t.id) ?? []) clearTimeout(timer)
-      return json(res, 204, {})
+      res.statusCode = 204
+      return void res.end()
     }
   }
 
@@ -234,6 +235,14 @@ function api(req: IncomingMessage, res: ServerResponse): void {
   }
 
   json(res, 404, { error: 'No encontrado' })
+}
+
+/** Solo para tests: olvida los trabajos y cancela sus temporizadores. */
+export function reiniciarMock(): void {
+  for (const timers of esperas.values()) for (const t of timers) clearTimeout(t)
+  esperas.clear()
+  trabajos.clear()
+  siguienteId = 1
 }
 
 export function mockApi(): Plugin {

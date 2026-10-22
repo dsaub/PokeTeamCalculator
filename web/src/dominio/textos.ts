@@ -68,3 +68,9 @@ export function leerRival(texto: string): { especie: string; nivel: number } | n
   const m = /^(.+) \(Nv\. (\d+)\)$/.exec(texto)
   return m ? { especie: m[1], nivel: Number(m[2]) } : null
 }
+
+/** Mensaje para mostrar de cualquier error capturado (`ApiError` ya lo trae en español). */
+export function mensajeDeError(e: unknown): string {
+  if (e instanceof Error) return e.message
+  return 'Ha ocurrido un error inesperado.'
+}

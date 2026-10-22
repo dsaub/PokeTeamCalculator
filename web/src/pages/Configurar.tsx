@@ -8,13 +8,8 @@ import { TypeBadge } from '../components/TypeBadge.tsx'
 import { cargarEquipo, cargarUltimoJuego, guardarContexto, guardarEquipo, guardarUltimoJuego } from '../dominio/almacen.ts'
 import { MAX_EQUIPO, nuevoMiembro, type MiembroEquipo } from '../dominio/equipo.ts'
 import { construirPeticion } from '../dominio/peticion.ts'
+import { mensajeDeError } from '../dominio/textos.ts'
 import { validarEquipo } from '../dominio/validacion.ts'
-
-function mensajeDeError(e: unknown): string {
-  if (e instanceof ApiError) return e.message
-  if (e instanceof Error) return e.message
-  return 'Ha ocurrido un error inesperado.'
-}
 
 export function Configurar() {
   const navegar = useNavigate()

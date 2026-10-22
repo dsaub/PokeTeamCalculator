@@ -7,7 +7,7 @@
     "dev": "vite",
     "dev:mock": "MOCK=1 vite",
     "build": "vite build",
-    "lint": "oxlint src mock vite.config.ts",
+    "lint": "oxlint src mock test vite.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "check": "bun run typecheck && bun run lint && bun test",
@@ -24,7 +24,11 @@
     "react-router": "7"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "^21.0.4",
     "@playwright/test": "^1.64.1",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
     "@types/bun": "^1.4.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.7",
