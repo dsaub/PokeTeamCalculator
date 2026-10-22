@@ -1,46 +1,42 @@
-// Inserta un trabajo en la tabla simulaciones para probar el worker a mano,
-// sin la API de Go. Imprime el id del trabajo.
+// Encola un trabajo en Redis para probar el worker a mano, sin la API de Go.
+// Imprime el id del trabajo.
 //
 //   bun herramientas/encolar.ts herramientas/ejemplo.json
-//   bun herramientas/encolar.ts herramientas/ejemplo.json --usuario ana --despertar
+//   bun herramientas/encolar.ts herramientas/ejemplo.json --id 42
 //
-// Usa DATABASE_URL y, con --despertar, también PUERTO y TOKEN_INTERNO para
-// llamar a POST /despertar del worker.
+// Usa REDIS_URL. Sin la API nadie aplica los estados que publica el worker; se
+// ven con `redis-cli XRANGE sim:estados - +`.
 
-import type { ResultSetHeader } from "mysql2/promise";
-import { Cola } from "../src/cola";
+import { RedisClient } from "bun";
+import { Claves } from "../src/cola";
 
 const args = process.argv.slice(2);
-const ruta = args.find((a) => !a.startsWith("--"));
-const iUsuario = args.indexOf("--usuario");
-const usuario = iUsuario >= 0 ? args[iUsuario + 1] ?? "pruebas" : "pruebas";
+const ruta = args[0]?.startsWith("--") ? undefined : args[0];
+const iId = args.indexOf("--id");
+// Por defecto, un id que no choca con los de MariaDB.
+const id = iId >= 0 ? Number(args[iId + 1]) : Date.now();
 
-if (!ruta || !process.env.DATABASE_URL) {
-  console.error("Uso: DATABASE_URL=mysql://… bun herramientas/encolar.ts <peticion.json> [--usuario nombre] [--despertar]");
+if (!ruta || !process.env.REDIS_URL || !Number.isSafeInteger(id) || id <= 0) {
+  console.error("Uso: REDIS_URL=redis://… bun herramientas/encolar.ts <peticion.json> [--id número]");
   process.exit(1);
 }
 
 // Se guarda tal cual: validar es trabajo del worker (así se prueban también los errores).
 const texto = await Bun.file(ruta).text();
 const peticion = JSON.stringify(JSON.parse(texto));
-const hash = new Bun.CryptoHasher("sha256").update(peticion).digest("hex");
 
-const bd = Cola.conectar(process.env.DATABASE_URL);
-try {
-  const [r] = await bd.query<ResultSetHeader>(
-    "INSERT INTO simulaciones (hash, usuario, peticion) VALUES (?, ?, ?)",
-    [hash, usuario, peticion],
-  );
-  console.log(r.insertId);
-} finally {
-  await bd.end();
-}
+const claves = new Claves();
+const redis = new RedisClient(process.env.REDIS_URL);
+// El mismo script que usa la API para encolar (api/endpoints/simulaciones/cola.go).
+const r = await redis.eval(`
+if redis.call('EXISTS', KEYS[1]) == 1 then return -1 end
+redis.call('HSET', KEYS[1], 'peticion', ARGV[2], 'intentos', ARGV[3])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+return redis.call('LPUSH', KEYS[2], ARGV[1])`, 2, claves.trabajo(id), claves.cola, String(id), peticion, 0, 24 * 60 * 60 * 1000);
+redis.close();
 
-if (args.includes("--despertar")) {
-  const puerto = process.env.PUERTO || "7070";
-  const r = await fetch(`http://127.0.0.1:${puerto}/despertar`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.TOKEN_INTERNO ?? ""}` },
-  }).catch((e: Error) => e);
-  if (r instanceof Error || !r.ok) console.error(`No se pudo despertar al worker: ${r instanceof Error ? r.message : `HTTP ${r.status}`}`);
+if (r === -1) {
+  console.error(`El trabajo ${id} ya existe en Redis.`);
+  process.exit(1);
 }
+console.log(id);

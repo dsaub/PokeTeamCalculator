@@ -1,18 +1,10 @@
 // Variables de entorno. Se leen y validan una sola vez al arrancar.
 
-import { isIP } from "node:net";
-
 export interface Config {
-  databaseUrl: string;
-  tokenInterno: string;
-  /** Sin barra final: "http://127.0.0.1:8081". */
-  urlCallback: string;
-  /** IP en la que escucha el servidor interno. */
-  host: string;
-  puerto: number;
+  /** "redis://:clave@127.0.0.1:6379/0". */
+  redisUrl: string;
   hilos: number;
   trabajosSimultaneos: number;
-  intervaloSondeoMs: number;
   intervaloLatidoMs: number;
   latidoCaducadoMs: number;
   maxIntentos: number;
@@ -23,8 +15,6 @@ export interface Config {
 export class ErrorConfig extends Error {
   override name = "ErrorConfig";
 }
-
-const LONGITUD_MINIMA_TOKEN = 16;
 
 type Entorno = Record<string, string | undefined>;
 
@@ -71,26 +61,10 @@ export function leerConfig(entorno: Entorno = process.env): Config {
     return texto;
   }
 
-  const databaseUrl = url("DATABASE_URL", ["mysql:", "mariadb:"], "mysql://usuario:clave@127.0.0.1:3306/bd");
-  const urlCallback = url("URL_CALLBACK", ["http:", "https:"], "http://127.0.0.1:8081").replace(/\/+$/, "");
-  const host = entorno.HOST_WORKER?.trim() || "127.0.0.1";
-  if (isIP(host) === 0) {
-    problemas.push("HOST_WORKER debe ser una IP válida (por ejemplo 127.0.0.1 o 0.0.0.0).");
-  }
-  const tokenInterno = obligatoria("TOKEN_INTERNO");
-  if (tokenInterno && tokenInterno.length < LONGITUD_MINIMA_TOKEN) {
-    problemas.push(`TOKEN_INTERNO debe tener al menos ${LONGITUD_MINIMA_TOKEN} caracteres.`);
-  }
-
   const config: Config = {
-    databaseUrl: databaseUrl.replace(/^mariadb:/, "mysql:"),
-    tokenInterno,
-    urlCallback,
-    host,
-    puerto: entero("PUERTO", 7070, 1, 65535),
+    redisUrl: url("REDIS_URL", ["redis:", "rediss:"], "redis://:clave@127.0.0.1:6379/0"),
     hilos: entero("HILOS", hilosPorDefecto(), 1, 1024),
     trabajosSimultaneos: entero("TRABAJOS_SIMULTANEOS", 2, 1, 1000),
-    intervaloSondeoMs: entero("INTERVALO_SONDEO_MS", 1000, 10),
     intervaloLatidoMs: entero("INTERVALO_LATIDO_MS", 5000, 100),
     latidoCaducadoMs: entero("LATIDO_CADUCADO_MS", 60000, 1000),
     maxIntentos: entero("MAX_INTENTOS", 3, 1, 100),
